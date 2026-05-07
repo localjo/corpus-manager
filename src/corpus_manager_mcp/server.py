@@ -43,7 +43,13 @@ CFG_WIKI = VP.wiki
 CFG_MANIFEST = VP.manifest
 CFG_CLAUDE_MD = VP.claude_md
 
-MCP = FastMCP("Corpus Manager")
+SERVER_INSTRUCTIONS = (
+    "Corpus Manager is a VPS-hosted second-brain server for markdown vault workflows. "
+    "Use capture to save quick notes into raw/, ingest/ingest_file to reconcile raw sources into wiki pages, "
+    "query for wiki-first answers, lint/verify for read-only audits, deprecate to retire sources, and stats for counts/health."
+)
+
+MCP = FastMCP("Corpus Manager", instructions=SERVER_INSTRUCTIONS)
 CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROPIC_API_KEY") else None
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
@@ -225,7 +231,9 @@ def _md_mcp_ping() -> str:
         return f"md-mcp health check failed: {exc}"
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Show vault health and counts: total/active/deprecated sources, pending raw files, wiki page count, and md-mcp reachability."
+)
 def stats() -> dict[str, Any]:
     manifest = _manifest_sources()
     active = [s for s in manifest if s.get("status") == "active"]
@@ -246,7 +254,12 @@ def stats() -> dict[str, Any]:
     }
 
 
-@MCP.tool()
+@MCP.tool(
+    description=(
+        "Save a quick note or raw idea into the vault raw/ directory. "
+        "Use this to capture thoughts, observations, reflections, or fragments for later ingest into the wiki."
+    )
+)
 def capture(content: str, filename: str = "", frontmatter: dict[str, Any] | None = None) -> dict[str, str]:
     slug = filename.strip() or datetime.now().strftime("capture-%Y%m%d-%H%M%S")
     if not slug.endswith(".md"):
@@ -269,7 +282,9 @@ def capture(content: str, filename: str = "", frontmatter: dict[str, Any] | None
     return {"written": rel}
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Answer a user question from wiki-first context. Optionally allow raw source grounding when explicit source quotes/verification are requested."
+)
 def query(question: str, allow_raw: bool = False) -> dict[str, str]:
     wiki_context = _query_context(question, allow_raw)
     raw_hint = "Allowed" if allow_raw else "Use raw/drafts/manuscript only if the question asks for verification or quotes."
@@ -285,7 +300,9 @@ def query(question: str, allow_raw: bool = False) -> dict[str, str]:
     return {"answer": answer}
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Read-only audit of one wiki page against its cited sources; returns confirmed claims, mismatches, and untraceable claims."
+)
 def verify(wiki_page: str) -> dict[str, str]:
     rel = wiki_page if wiki_page.startswith("wiki/") else f"wiki/{wiki_page}"
     bundle = verify_bundle_for_page(CFG_ROOT, rel)
@@ -300,7 +317,9 @@ def verify(wiki_page: str) -> dict[str, str]:
     return {"report": report}
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Read-only vault quality check for broken wikilinks, traceability gaps, deprecated references, missing sources, and index coverage issues."
+)
 def lint() -> dict[str, Any]:
     det = build_lint_payload(CFG_ROOT)
     det_json = json.dumps(det, indent=2, ensure_ascii=False)[:70000]
@@ -339,7 +358,9 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
     )
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Run full ingest over pending raw/ sources. Reconciles wiki pages in place, updates manifest provenance, and appends operation logs."
+)
 def ingest() -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
@@ -365,7 +386,9 @@ def ingest() -> dict[str, Any]:
     }
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Run targeted ingest for a single source file path (raw/, drafts/, or manuscript/) and reconcile affected wiki/manifest state."
+)
 def ingest_file(filename: str) -> dict[str, Any]:
     rel = filename if filename.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{filename}"
     out = _run_ingest_agent(rel)
@@ -373,7 +396,9 @@ def ingest_file(filename: str) -> dict[str, Any]:
     return {"source": rel, **out, "traceability_warnings": warnings}
 
 
-@MCP.tool()
+@MCP.tool(
+    description="Deprecate a source file with a reason, update manifest status, and reconcile affected wiki pages and citations."
+)
 def deprecate(filename: str, reason: str) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for deprecate")
