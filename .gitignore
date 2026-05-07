@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+
+# Python/cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# OS/editor noise
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Runtime/project-local state (do not commit)
+vault/
+test-vault/
+syncthing-config/
+
+# Build/log artifacts
+build/
+dist/
+*.log
+
+# Generated release artifact (rebuild from skill/SKILL.md)
+skill/*.zip

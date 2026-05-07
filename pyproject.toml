@@ -1,0 +1,26 @@
+[project]
+name = "corpus-manager-mcp"
+version = "0.1.0"
+description = "KISS wrapper MCP server for VPS second-brain workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=0.52.0",
+  "fastmcp>=2.3.0",
+  "httpx>=0.28.0",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.2"
+]
+
+[project.scripts]
+corpus-manager-mcp = "corpus_manager_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
