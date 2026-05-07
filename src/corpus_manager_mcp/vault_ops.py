@@ -162,6 +162,27 @@ def manifest_upsert_source(
     return {"ok": True, "filename": filename, "wiki_pages": wiki_pages, "ingested_at": iso_now}
 
 
+def manifest_get_source(manifest_path: Path, filename: str) -> dict[str, Any]:
+    doc = manifest_load(manifest_path)
+    sources: list[dict[str, Any]] = doc["sources"]
+    for entry in sources:
+        if entry.get("filename") == filename:
+            return {
+                "ok": True,
+                "source": {
+                    "filename": entry.get("filename"),
+                    "layer": entry.get("layer"),
+                    "book": entry.get("book"),
+                    "ingested_at": entry.get("ingested_at"),
+                    "wiki_pages": entry.get("wiki_pages") or [],
+                    "status": entry.get("status"),
+                    "deprecation_reason": entry.get("deprecation_reason"),
+                    "deprecated_at": entry.get("deprecated_at"),
+                },
+            }
+    return {"ok": False, "error": f"source not found in manifest: {filename}"}
+
+
 def manifest_deprecate_source(
     manifest_path: Path,
     filename: str,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ from corpus_manager_mcp.vault_ops import (
     append_operation_log,
     infer_layer_book,
     manifest_deprecate_source,
+    manifest_get_source,
     manifest_upsert_source,
     vault_read,
     wiki_write,
@@ -47,6 +49,20 @@ INGEST_TOOLS: list[dict[str, Any]] = [
                 "content": {"type": "string", "description": "Full file contents including YAML frontmatter"},
             },
             "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "manifest_get_source",
+        "description": "Get one source entry from manifest.json by filename (compact fields only; avoids reading full manifest).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Source path relative to vault root (e.g. raw/x.md)",
+                },
+            },
+            "required": ["filename"],
         },
     },
     {
@@ -107,19 +123,30 @@ DEPRECATE_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "manifest_get_source",
+        "description": "Get one source entry from manifest.json by filename.",
+        "input_schema": INGEST_TOOLS[2]["input_schema"],
+    },
+    {
         "name": "append_operation_log",
         "description": "Append a structured entry to wiki/log.md.",
-        "input_schema": INGEST_TOOLS[3]["input_schema"],
+        "input_schema": INGEST_TOOLS[4]["input_schema"],
     },
 ]
 
 
 def _build_dispatch(root: Path, manifest_path: Path) -> dict[str, ToolHandler]:
     def vault_read_tool(inp: dict[str, Any]) -> dict[str, Any]:
-        return vault_read(root, inp["path"])
+        path = str(inp["path"])
+        if path.replace("\\", "/").lstrip("/") == "manifest.json":
+            return {"ok": False, "error": "Reading full manifest.json is disabled in tool loops. Use manifest_get_source."}
+        return vault_read(root, path, max_bytes=40_000)
 
     def wiki_write_tool(inp: dict[str, Any]) -> dict[str, Any]:
         return wiki_write(root, inp["path"], inp["content"])
+
+    def manifest_get_source_tool(inp: dict[str, Any]) -> dict[str, Any]:
+        return manifest_get_source(manifest_path, inp["filename"])
 
     def manifest_upsert_tool(inp: dict[str, Any]) -> dict[str, Any]:
         fn = inp["filename"]
@@ -146,6 +173,7 @@ def _build_dispatch(root: Path, manifest_path: Path) -> dict[str, ToolHandler]:
     return {
         "vault_read": vault_read_tool,
         "wiki_write": wiki_write_tool,
+        "manifest_get_source": manifest_get_source_tool,
         "manifest_upsert_source": manifest_upsert_tool,
         "manifest_deprecate_source": manifest_deprecate_tool,
         "append_operation_log": append_log_tool,
@@ -162,19 +190,36 @@ def run_tool_loop(
     tools: list[dict[str, Any]],
     *,
     max_turns: int = 28,
+    max_tokens: int = 16_384,
+    retry_attempts: int = 3,
+    retry_wait_seconds: int = 12,
 ) -> dict[str, Any]:
     dispatch = _build_dispatch(root, manifest_path)
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
     last_text = ""
 
     for _ in range(max_turns):
-        resp = client.messages.create(
-            model=model,
-            max_tokens=16_384,
-            system=system,
-            tools=tools,
-            messages=messages,
-        )
+        last_exc: Exception | None = None
+        resp = None
+        for attempt in range(retry_attempts + 1):
+            try:
+                resp = client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    tools=tools,
+                    messages=messages,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                msg = str(exc).lower()
+                is_rate_limit = "rate_limit_error" in msg or "429" in msg or "rate limit" in msg
+                if not is_rate_limit or attempt >= retry_attempts:
+                    return {"ok": False, "error": str(exc), "summary_text": last_text}
+                time.sleep(retry_wait_seconds * (attempt + 1))
+        if resp is None and last_exc is not None:
+            return {"ok": False, "error": str(last_exc), "summary_text": last_text}
 
         text_parts: list[str] = []
         tool_uses: list[Any] = []

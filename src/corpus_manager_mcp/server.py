@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,16 @@ CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROP
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 ANTHROPIC_QUERY_MODEL = os.getenv("ANTHROPIC_QUERY_MODEL", "claude-sonnet-4-5")
+# Use Opus for ingest operations to benefit from higher ingest TPM limits.
+ANTHROPIC_INGEST_MODEL = "claude-opus-4-1-20250805"
 MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
+INGEST_SOURCE_CHAR_LIMIT = int(os.getenv("INGEST_SOURCE_CHAR_LIMIT", "6000"))
+INGEST_CLAUDE_MD_CHAR_LIMIT = int(os.getenv("INGEST_CLAUDE_MD_CHAR_LIMIT", "8000"))
+INGEST_LOOP_MAX_TURNS = 10
+INGEST_LOOP_MAX_TOKENS = 2500
+INGEST_RATE_RETRY_ATTEMPTS = int(os.getenv("INGEST_RATE_RETRY_ATTEMPTS", "3"))
+INGEST_RATE_RETRY_WAIT_SECONDS = int(os.getenv("INGEST_RATE_RETRY_WAIT_SECONDS", "12"))
+INGEST_SOURCE_DELAY_SECONDS = 5
 
 
 def _resolve(path: str) -> Path:
@@ -117,7 +127,7 @@ wiki_pages in manifest use paths relative to wiki/ (e.g. concepts/foo.md), NOT p
 
 
 def build_system_prompt() -> str:
-    claude = _read_text(CFG_CLAUDE_MD)[:20000]
+    claude = _read_text(CFG_CLAUDE_MD)[:INGEST_CLAUDE_MD_CHAR_LIMIT]
     return f"{OP_RULES}\n\n--- Vault CLAUDE.md ---\n{claude}"
 
 
@@ -243,6 +253,7 @@ def stats() -> dict[str, Any]:
     pending = _pending_sources()
     return {
         "vault_root": str(CFG_ROOT),
+        "ingest_model": ANTHROPIC_INGEST_MODEL,
         "total_sources": len(manifest),
         "active_sources": len(active),
         "deprecated_sources": len(deprecated),
@@ -343,18 +354,22 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
     system = build_system_prompt()
     user_msg = (
         f"Ingest this source into the wiki (reconcile in place). Source path: `{source_rel}`.\n\n"
-        f"--- SOURCE BEGIN ---\n{src_text[:16000]}\n--- SOURCE END ---\n\n"
+        f"--- SOURCE BEGIN ---\n{src_text[:INGEST_SOURCE_CHAR_LIMIT]}\n--- SOURCE END ---\n\n"
         "Use tools until manifest is updated, wiki pages written/updated, index updated if needed, and log appended."
+        "Use manifest_get_source for source metadata; do not read full manifest.json."
     )
     return run_tool_loop(
         CLIENT,
-        ANTHROPIC_MODEL,
+        ANTHROPIC_INGEST_MODEL,
         system,
         user_msg,
         CFG_ROOT,
         CFG_MANIFEST,
         INGEST_TOOLS,
-        max_turns=28,
+        max_turns=INGEST_LOOP_MAX_TURNS,
+        max_tokens=INGEST_LOOP_MAX_TOKENS,
+        retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
+        retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )
 
 
@@ -374,8 +389,10 @@ def ingest() -> dict[str, Any]:
         }
 
     results: list[dict[str, Any]] = []
-    for rel in pending:
+    for idx, rel in enumerate(pending):
         results.append({"source": rel, **_run_ingest_agent(rel)})
+        if INGEST_SOURCE_DELAY_SECONDS > 0 and idx < len(pending) - 1:
+            time.sleep(INGEST_SOURCE_DELAY_SECONDS)
 
     warnings = traceability_warnings(CFG_ROOT)
     return {
@@ -414,13 +431,16 @@ def deprecate(filename: str, reason: str) -> dict[str, Any]:
     )
     out = run_tool_loop(
         CLIENT,
-        ANTHROPIC_MODEL,
+        ANTHROPIC_INGEST_MODEL,
         system,
         user_msg,
         CFG_ROOT,
         CFG_MANIFEST,
         DEPRECATE_TOOLS,
-        max_turns=28,
+        max_turns=INGEST_LOOP_MAX_TURNS,
+        max_tokens=INGEST_LOOP_MAX_TOKENS,
+        retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
+        retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )
     warnings = traceability_warnings(CFG_ROOT)
     return {"source": rel, **out, "traceability_warnings": warnings}
