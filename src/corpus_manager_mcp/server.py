@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,43 +13,47 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
+from corpus_manager_mcp.agent import DEPRECATE_TOOLS, INGEST_TOOLS, run_tool_loop
+from corpus_manager_mcp.deterministic import (
+    build_lint_payload,
+    verify_bundle_for_page,
+    _wiki_paths_index,
+    resolve_wikilink_target,
+)
+from corpus_manager_mcp.vault_ops import (
+    VaultPaths,
+    append_operation_log,
+    extract_wikilinks,
+    traceability_warnings,
+    vault_read,
+)
+
 load_dotenv()
 
 
-@dataclass
-class Config:
-    vault_root: Path
-    claude_md_path: Path
-    wiki_root: Path
-    raw_root: Path
-    manifest_path: Path
-    anthropic_model: str
-    anthropic_query_model: str
-    md_mcp_http_url: str
-
-
-def _build_config() -> Config:
+def _build_config() -> VaultPaths:
     vault_root = Path(os.getenv("VAULT_ROOT", "/data/vault")).expanduser().resolve()
-    return Config(
-        vault_root=vault_root,
-        claude_md_path=Path(os.getenv("CLAUDE_MD_PATH", str(vault_root / "CLAUDE.md"))).expanduser().resolve(),
-        wiki_root=vault_root / "wiki",
-        raw_root=vault_root / "raw",
-        manifest_path=vault_root / "manifest.json",
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        anthropic_query_model=os.getenv("ANTHROPIC_QUERY_MODEL", "claude-sonnet-4-5"),
-        md_mcp_http_url=os.getenv("MD_MCP_HTTP_URL", "").rstrip("/"),
-    )
+    claude_md = Path(os.getenv("CLAUDE_MD_PATH", str(vault_root / "CLAUDE.md"))).expanduser().resolve()
+    return VaultPaths.from_roots(vault_root, claude_md)
 
 
-CFG = _build_config()
+VP = _build_config()
+CFG_ROOT = VP.root
+CFG_WIKI = VP.wiki
+CFG_MANIFEST = VP.manifest
+CFG_CLAUDE_MD = VP.claude_md
+
 MCP = FastMCP("Corpus Manager")
 CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROPIC_API_KEY") else None
 
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_QUERY_MODEL = os.getenv("ANTHROPIC_QUERY_MODEL", "claude-sonnet-4-5")
+MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
+
 
 def _resolve(path: str) -> Path:
-    p = (CFG.vault_root / path).resolve()
-    if not str(p).startswith(str(CFG.vault_root)):
+    p = (CFG_ROOT / path).resolve()
+    if not str(p).startswith(str(CFG_ROOT)):
         raise ValueError("Path escapes VAULT_ROOT")
     return p
 
@@ -72,13 +75,6 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _append_log(line: str) -> None:
-    log_path = CFG.wiki_root / "log.md"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    entry = f"\n## [{ts}] mcp-operation | {line}\n\n- via Corpus Manager MCP\n"
-    _write_text(log_path, _read_text(log_path) + entry)
-
-
 def _extract_text(resp: Any) -> str:
     parts = []
     for item in resp.content:
@@ -98,15 +94,36 @@ def _run_model(prompt: str, model: str) -> str:
     return _extract_text(resp)
 
 
+OP_RULES = """
+Karpathy-style wiki (operational layer):
+- raw/ is read-only for automation; wiki/ and manifest.json are maintained by ingest tools.
+- Never write to manuscript/ or drafts/ unless the user explicitly requested it (tools do not allow it).
+- manuscript/ and drafts/ outrank raw/ when both address the same factual claims; surface conflicts with warning callouts, never silent merges.
+- Use YAML frontmatter on wiki pages: type, book, sources, date_updated, tags as appropriate.
+- Wikilinks [[like/this]] aggressively; first mention should link.
+- Reconcile in place; do not duplicate pages.
+- After editing wiki pages, call manifest_upsert_source with the source filename and full wiki_pages list (paths relative to wiki/, no wiki/ prefix).
+- Update wiki/index.md when adding navigable pages.
+- Finish by append_operation_log with bullets listing wiki paths touched and manifest updated.
+
+wiki_pages in manifest use paths relative to wiki/ (e.g. concepts/foo.md), NOT prefixed with wiki/.
+"""
+
+
+def build_system_prompt() -> str:
+    claude = _read_text(CFG_CLAUDE_MD)[:20000]
+    return f"{OP_RULES}\n\n--- Vault CLAUDE.md ---\n{claude}"
+
+
 def _list_raw_files() -> list[Path]:
-    if not CFG.raw_root.exists():
+    raw_root = CFG_ROOT / "raw"
+    if not raw_root.exists():
         return []
-    return [p for p in CFG.raw_root.rglob("*") if p.is_file() and not _is_ignored_source(p)]
+    return [p for p in raw_root.rglob("*") if p.is_file() and not _is_ignored_source(p)]
 
 
 def _is_ignored_source(path: Path) -> bool:
     name = path.name
-    # Ignore hidden/system/editor metadata files during ingest scans.
     if name.startswith("."):
         return True
     if name.startswith("._"):
@@ -119,7 +136,7 @@ def _is_ignored_source(path: Path) -> bool:
 
 
 def _manifest_sources() -> list[dict[str, Any]]:
-    doc = _read_json(CFG.manifest_path)
+    doc = _read_json(CFG_MANIFEST)
     sources = doc.get("sources")
     return sources if isinstance(sources, list) else []
 
@@ -129,7 +146,7 @@ def _pending_sources() -> list[str]:
     by_filename = {entry.get("filename"): entry for entry in manifest if isinstance(entry, dict)}
     pending: list[str] = []
     for f in _list_raw_files():
-        rel = str(f.relative_to(CFG.vault_root))
+        rel = str(f.relative_to(CFG_ROOT))
         entry = by_filename.get(rel) or by_filename.get(f.name)
         if not entry:
             pending.append(rel)
@@ -151,29 +168,58 @@ def _pending_sources() -> list[str]:
     return sorted(set(pending))
 
 
-def _search_wiki(question: str) -> str:
-    # KISS retrieval: cheap keyword scan before model synthesis.
+def _search_wiki_keywords(question: str, limit: int = 8) -> list[str]:
     tokens = [t for t in re.split(r"\W+", question.lower()) if len(t) >= 4]
     hits: list[tuple[int, Path]] = []
-    for p in CFG.wiki_root.rglob("*.md"):
+    for p in CFG_WIKI.rglob("*.md"):
         text = _read_text(p).lower()
         score = sum(tok in text for tok in tokens)
         if score:
             hits.append((score, p))
     hits.sort(key=lambda x: x[0], reverse=True)
-    top = [str(p.relative_to(CFG.vault_root)) for _, p in hits[:8]]
-    chunks = []
-    for rel in top:
-        chunks.append(f"## {rel}\n{_read_text(_resolve(rel))[:4000]}")
+    return [str(p.relative_to(CFG_ROOT)) for _, p in hits[:limit]]
+
+
+def _query_context(question: str, allow_raw: bool) -> str:
+    chunks: list[str] = []
+    index_path = CFG_WIKI / "index.md"
+    index_text = _read_text(index_path)[:12000]
+    chunks.append(f"## wiki/index.md\n{index_text}")
+
+    idx = _wiki_paths_index(CFG_ROOT)
+    neighbor_rels: list[str] = []
+    for link in extract_wikilinks(index_text)[:24]:
+        resolved = resolve_wikilink_target(CFG_ROOT, link, idx)
+        if resolved:
+            neighbor_rels.append(str(resolved.relative_to(CFG_ROOT)))
+
+    seen: set[str] = set()
+    for rel in neighbor_rels:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        chunks.append(f"## {rel}\n{_read_text(_resolve(rel))[:4500]}")
+
+    for rel in _search_wiki_keywords(question, limit=6):
+        if rel not in seen:
+            seen.add(rel)
+            chunks.append(f"## {rel}\n{_read_text(_resolve(rel))[:4500]}")
+
+    if allow_raw:
+        raw_hint = _search_wiki_keywords(question, limit=3)
+        for r in raw_hint:
+            if r.startswith("raw/"):
+                chunks.append(f"## {r}\n{_read_text(_resolve(r))[:6000]}")
+
     return "\n\n".join(chunks)
 
 
 def _md_mcp_ping() -> str:
-    if not CFG.md_mcp_http_url:
+    if not MD_MCP_HTTP_URL:
         return "md-mcp HTTP URL not configured"
     try:
         with httpx.Client(timeout=8.0) as client:
-            r = client.get(CFG.md_mcp_http_url)
+            r = client.get(MD_MCP_HTTP_URL)
             return f"md-mcp reachable: {r.status_code}"
     except Exception as exc:  # noqa: BLE001
         return f"md-mcp health check failed: {exc}"
@@ -184,11 +230,11 @@ def stats() -> dict[str, Any]:
     manifest = _manifest_sources()
     active = [s for s in manifest if s.get("status") == "active"]
     deprecated = [s for s in manifest if s.get("status") == "deprecated"]
-    wiki_pages = list(CFG.wiki_root.rglob("*.md")) if CFG.wiki_root.exists() else []
+    wiki_pages = list(CFG_WIKI.rglob("*.md")) if CFG_WIKI.exists() else []
     ingested = [s.get("ingested_at") for s in manifest if s.get("ingested_at")]
     pending = _pending_sources()
     return {
-        "vault_root": str(CFG.vault_root),
+        "vault_root": str(CFG_ROOT),
         "total_sources": len(manifest),
         "active_sources": len(active),
         "deprecated_sources": len(deprecated),
@@ -214,103 +260,145 @@ def capture(content: str, filename: str = "", frontmatter: dict[str, Any] | None
         body = f"---\n{fm}\n---\n\n{body}"
 
     _write_text(path, body)
-    _append_log(f"capture | {rel}")
+    append_operation_log(
+        CFG_ROOT,
+        "capture",
+        rel,
+        [f"wrote `{rel}`"],
+    )
     return {"written": rel}
 
 
 @MCP.tool()
 def query(question: str, allow_raw: bool = False) -> dict[str, str]:
-    wiki_context = _search_wiki(question)
-    raw_hint = "Allowed" if allow_raw else "Not allowed unless explicitly required."
+    wiki_context = _query_context(question, allow_raw)
+    raw_hint = "Allowed" if allow_raw else "Use raw/drafts/manuscript only if the question asks for verification or quotes."
     prompt = (
-        f"Use the vault context to answer. Cite wiki paths in backticks.\\n"
-        f"Question: {question}\\n"
-        f"Raw usage: {raw_hint}\\n\\n"
-        f"Vault CLAUDE.md:\\n{_read_text(CFG.claude_md_path)[:12000]}\\n\\n"
-        f"Wiki context:\\n{wiki_context}"
+        "Answer from the wiki-first context below. Cite wiki paths in backticks.\n"
+        "If the user might want a reusable synthesis page, mention it once at the end as an optional follow-up — do not create pages.\n\n"
+        f"Question: {question}\n\n"
+        f"Source layers policy: {raw_hint}\n\n"
+        f"Vault CLAUDE.md:\n{_read_text(CFG_CLAUDE_MD)[:12000]}\n\n"
+        f"Context:\n{wiki_context}"
     )
-    answer = _run_model(prompt, CFG.anthropic_query_model)
-    _append_log("query")
+    answer = _run_model(prompt, ANTHROPIC_QUERY_MODEL)
     return {"answer": answer}
 
 
 @MCP.tool()
 def verify(wiki_page: str) -> dict[str, str]:
     rel = wiki_page if wiki_page.startswith("wiki/") else f"wiki/{wiki_page}"
-    page = _read_text(_resolve(rel))
+    bundle = verify_bundle_for_page(CFG_ROOT, rel)
+    payload = json.dumps(bundle, indent=2, ensure_ascii=False)[:90000]
     prompt = (
-        "Audit this page and return: confirmed claims, mismatches, missing sources.\\n"
-        f"Page path: {rel}\\n\\n"
-        f"{page}"
+        "Read-only audit. Classify claims into: confirmed (supported by cited sources), "
+        "mismatched (quote what source says vs wiki claim), untraceable (no cited support).\n"
+        "Do not suggest edits.\n\n"
+        f"{payload}"
     )
-    report = _run_model(prompt, CFG.anthropic_model)
-    _append_log(f"verify | {rel}")
+    report = _run_model(prompt, ANTHROPIC_QUERY_MODEL)
     return {"report": report}
 
 
 @MCP.tool()
-def lint() -> dict[str, str]:
-    index = _read_text(CFG.wiki_root / "index.md")
-    manifest = json.dumps(_read_json(CFG.manifest_path), indent=2)[:50000]
+def lint() -> dict[str, Any]:
+    det = build_lint_payload(CFG_ROOT)
+    det_json = json.dumps(det, indent=2, ensure_ascii=False)[:70000]
     prompt = (
-        "Lint this vault and report prioritized issues: broken links, orphan pages, stale or contradictory claims.\\n"
-        f"index.md:\\n{index}\\n\\nmanifest.json:\\n{manifest}"
+        "You are linting a markdown wiki vault. Deterministic findings are already listed.\n"
+        "Add qualitative findings only: suspected unstated contradictions, privacy/pseudonym risks, stale narrative — "
+        "as findings with suggested fixes. Do not claim files were auto-fixed.\n\n"
+        f"DETERMINISTIC_JSON:\n{det_json}"
     )
-    report = _run_model(prompt, CFG.anthropic_model)
-    _append_log("lint")
-    return {"report": report}
+    narrative = _run_model(prompt, ANTHROPIC_QUERY_MODEL)
+    return {"deterministic": det, "narrative_report": narrative}
+
+
+def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
+    if CLIENT is None:
+        raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
+    read_out = vault_read(CFG_ROOT, source_rel)
+    if not read_out.get("ok"):
+        return {"ok": False, "error": read_out.get("error"), "source": source_rel}
+    src_text = read_out.get("content") or ""
+    system = build_system_prompt()
+    user_msg = (
+        f"Ingest this source into the wiki (reconcile in place). Source path: `{source_rel}`.\n\n"
+        f"--- SOURCE BEGIN ---\n{src_text[:16000]}\n--- SOURCE END ---\n\n"
+        "Use tools until manifest is updated, wiki pages written/updated, index updated if needed, and log appended."
+    )
+    return run_tool_loop(
+        CLIENT,
+        ANTHROPIC_MODEL,
+        system,
+        user_msg,
+        CFG_ROOT,
+        CFG_MANIFEST,
+        INGEST_TOOLS,
+        max_turns=28,
+    )
 
 
 @MCP.tool()
 def ingest() -> dict[str, Any]:
+    if CLIENT is None:
+        raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     pending = _pending_sources()
-    touched: list[str] = []
-    summaries: list[str] = []
+    if not pending:
+        return {
+            "pending_count": 0,
+            "sources_processed": [],
+            "results": [],
+            "traceability_warnings": traceability_warnings(CFG_ROOT),
+        }
 
-    # KISS: per-source VPS loop. One outer MCP call; repeated inner model calls.
+    results: list[dict[str, Any]] = []
     for rel in pending:
-        source = _read_text(_resolve(rel))[:14000]
-        prompt = (
-            "Given source text and existing vault rules, propose concise wiki updates. "
-            "Return plain markdown bullets with page paths and required edits.\\n"
-            f"Source: {rel}\\n\\n{source}\\n\\n"
-            f"Vault rules:\\n{_read_text(CFG.claude_md_path)[:8000]}"
-        )
-        summaries.append(f"### {rel}\\n" + _run_model(prompt, CFG.anthropic_model))
-        touched.append(rel)
+        results.append({"source": rel, **_run_ingest_agent(rel)})
 
-    _append_log(f"ingest | {len(touched)} source(s)")
+    warnings = traceability_warnings(CFG_ROOT)
     return {
         "pending_count": len(pending),
-        "sources": touched,
-        "plan": "\\n\\n".join(summaries) if summaries else "No pending sources.",
+        "sources_processed": pending,
+        "results": results,
+        "traceability_warnings": warnings,
     }
 
 
 @MCP.tool()
-def ingest_file(filename: str) -> dict[str, str]:
+def ingest_file(filename: str) -> dict[str, Any]:
     rel = filename if filename.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{filename}"
-    text = _read_text(_resolve(rel))[:20000]
-    prompt = (
-        "Reconcile this source with the wiki and return concrete page edits as markdown bullets.\\n"
-        f"Source path: {rel}\\n\\n{text}\\n\\n"
-        f"Vault rules:\\n{_read_text(CFG.claude_md_path)[:9000]}"
-    )
-    plan = _run_model(prompt, CFG.anthropic_model)
-    _append_log(f"ingest_file | {rel}")
-    return {"source": rel, "plan": plan}
+    out = _run_ingest_agent(rel)
+    warnings = traceability_warnings(CFG_ROOT)
+    return {"source": rel, **out, "traceability_warnings": warnings}
 
 
 @MCP.tool()
-def deprecate(filename: str, reason: str) -> dict[str, str]:
+def deprecate(filename: str, reason: str) -> dict[str, Any]:
+    if CLIENT is None:
+        raise RuntimeError("ANTHROPIC_API_KEY is required for deprecate")
     rel = filename if filename.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{filename}"
-    prompt = (
-        "Generate a deprecation action plan for this source, including manifest fields and affected wiki pages.\\n"
-        f"Source: {rel}\\nReason: {reason}\\n"
+    system = build_system_prompt() + (
+        "\nDeprecation mode: mark manifest deprecated, remove or rewrite claims supported only by this source, "
+        "update wiki frontmatter sources lists, adjust index if pages removed, note partial excision if cleanup incomplete. "
+        "Use manifest_deprecate_source and wiki_write; finish with append_operation_log."
     )
-    result = _run_model(prompt, CFG.anthropic_model)
-    _append_log(f"deprecate | {rel}")
-    return {"source": rel, "result": result}
+    user_msg = (
+        f"Deprecate source `{rel}`.\nReason: {reason}\n"
+        "Look up manifest entry and affected wiki pages via vault_read, edit pages, then deprecate in manifest."
+    )
+    out = run_tool_loop(
+        CLIENT,
+        ANTHROPIC_MODEL,
+        system,
+        user_msg,
+        CFG_ROOT,
+        CFG_MANIFEST,
+        DEPRECATE_TOOLS,
+        max_turns=28,
+    )
+    warnings = traceability_warnings(CFG_ROOT)
+    return {"source": rel, **out, "traceability_warnings": warnings}
 
 
 def main() -> None:
