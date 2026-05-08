@@ -22,6 +22,8 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 | “Process captured thoughts”, “Update the wiki”, “Sync my notes into the knowledge base”, “Run ingest”, “Process unprocessed files”, “Initialize my wiki” | `ingest` | Start-or-report background ingest. If already running, return status/progress. If no captures exist yet, can initialize a starter wiki scaffold. |
 | “Ingest this into the wiki”, “Process this file”, “Update from this source” | `ingest` | Use optional `filename` argument for targeted ingest when the user references a specific path/file. |
 | “Initialize my wiki around X”, “Start my knowledge base about X” | `ingest` | Use optional `topic` argument to seed first-time starter wiki scaffolding when the vault has no captures yet. |
+| “Try the ingest again”, “Retry the ingest”, “The previous ingest failed, run it again” | `ingest` | Pass `retry=true` to start a fresh attempt after a failed job. Without it, repeat calls return the previous failure so the user can see why it failed before retrying. |
+| “Try ingesting with a different model”, “Fall back to Sonnet for ingest”, “Opus is failing, use a different model” | `ingest` | Pass `model` (e.g. `claude-sonnet-4-6`) to override the configured ingest model for this job; useful when the default model is having issues. Combine with `retry=true` to retry a failed job on a different model. |
 | “What’s the wiki status?”, “Check knowledge base status”, “What’s pending?”, “Do I have unprocessed captures?” | `stats` | Get current state and pending count. |
 | “Ask the wiki…”, “What do my notes say about X?”, “Search my knowledge base for X”, “What have I captured about X?” | `query` | Use `question`; set `allow_raw=true` only when user requests direct source grounding/quotes. |
 | “Audit this page”, “Verify this entry against sources” | `verify` | Read-only source-grounding check for one page. |
@@ -36,6 +38,7 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 4. Treat `ingest` as both launcher and status endpoint: call it again to check progress.
 5. If user asks for status and pending sources are non-zero, ask once whether they want to process captures now.
 6. If user asks a knowledge question, prefer `query` automatically even when they say “notes”, “memory”, “knowledge base”, or “second brain” instead of “wiki”.
+7. If `ingest` reports a previous failed job, summarize `errors_preview` for the user and offer to retry. If the failure looks model-specific (e.g. repeated 5xx from the API on one model), suggest retrying with a `model` fallback (e.g. `claude-sonnet-4-6`).
 
 ## Vault assumptions
 
