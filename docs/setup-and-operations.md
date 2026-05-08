@@ -56,6 +56,9 @@ ANTHROPIC_MODEL=claude-sonnet-4-5
 ANTHROPIC_QUERY_MODEL=claude-sonnet-4-5
 # Optional: model used by ingest/deprecate. Defaults to ANTHROPIC_MODEL.
 ANTHROPIC_INGEST_MODEL=claude-opus-4-7
+# Optional: ingest agent loop budgets.
+INGEST_LOOP_MAX_TURNS=35
+INGEST_LOOP_MAX_TOKENS=8192
 
 HOST=0.0.0.0
 PORT=8765

@@ -9,7 +9,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import yaml
@@ -65,7 +65,7 @@ MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
 INGEST_SOURCE_CHAR_LIMIT = int(os.getenv("INGEST_SOURCE_CHAR_LIMIT", "6000"))
 INGEST_CLAUDE_MD_CHAR_LIMIT = int(os.getenv("INGEST_CLAUDE_MD_CHAR_LIMIT", "8000"))
 INGEST_LOOP_MAX_TURNS = int(os.getenv("INGEST_LOOP_MAX_TURNS", "35"))
-INGEST_LOOP_MAX_TOKENS = 2500
+INGEST_LOOP_MAX_TOKENS = int(os.getenv("INGEST_LOOP_MAX_TOKENS", "8192"))
 INGEST_RATE_RETRY_ATTEMPTS = int(os.getenv("INGEST_RATE_RETRY_ATTEMPTS", "3"))
 INGEST_RATE_RETRY_WAIT_SECONDS = int(os.getenv("INGEST_RATE_RETRY_WAIT_SECONDS", "12"))
 INGEST_SOURCE_DELAY_SECONDS = 5
@@ -378,17 +378,35 @@ def _spawn_ingest_worker(job_id: str) -> None:
                         job["finished_at"] = _utc_now()
                         job["updated_at"] = _utc_now()
                         job["current_source"] = None
+                        job["current_turn"] = None
                         _save_ingest_jobs(doc)
                         return
                     rel = pending[0]
                     job_model = job.get("model") or ANTHROPIC_INGEST_MODEL
                     job_max_turns = int(job.get("max_turns") or INGEST_LOOP_MAX_TURNS)
+                    job_max_tokens = int(job.get("max_tokens") or INGEST_LOOP_MAX_TOKENS)
                     job["status"] = "running"
                     job["current_source"] = rel
+                    job["current_turn"] = 0
                     job["updated_at"] = _utc_now()
                     _save_ingest_jobs(doc)
 
-                result = _run_ingest_agent(rel, model=job_model, max_turns=job_max_turns)
+                def _on_turn_start(turn_index: int, _job_id: str = job_id) -> None:
+                    with _INGEST_LOCK:
+                        doc_inner = _load_ingest_jobs()
+                        job_inner = doc_inner.get("jobs", {}).get(_job_id)
+                        if isinstance(job_inner, dict):
+                            job_inner["current_turn"] = turn_index + 1
+                            job_inner["updated_at"] = _utc_now()
+                            _save_ingest_jobs(doc_inner)
+
+                result = _run_ingest_agent(
+                    rel,
+                    model=job_model,
+                    max_turns=job_max_turns,
+                    max_tokens=job_max_tokens,
+                    on_turn_start=_on_turn_start,
+                )
 
                 with _INGEST_LOCK:
                     doc = _load_ingest_jobs()
@@ -411,6 +429,12 @@ def _spawn_ingest_worker(job_id: str) -> None:
                                 f"Hit per-source turn budget of {job_max_turns}. "
                                 "Retry with a higher budget: ingest(retry=True, max_turns=N) "
                                 "where N is e.g. 40 for complex multi-page reconciliations."
+                            )
+                        if result.get("error") == "output_token_limit_exceeded":
+                            error_entry["last_summary_text"] = result.get("summary_text") or ""
+                            error_entry["remedy"] = (
+                                f"Hit per-turn output token budget of {job_max_tokens}. "
+                                "Increase INGEST_LOOP_MAX_TOKENS and retry the ingest."
                             )
                         job["errors"] = list(job.get("errors") or []) + [error_entry]
                         job["results"] = list(job.get("results") or []) + [{"source": rel, **result}]
@@ -468,10 +492,12 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
         "status": job.get("status"),
         "model": job.get("model"),
         "max_turns": job.get("max_turns"),
+        "max_tokens": job.get("max_tokens"),
         "started_at": job.get("started_at"),
         "updated_at": job.get("updated_at"),
         "finished_at": job.get("finished_at"),
         "current_source": job.get("current_source"),
+        "current_turn": job.get("current_turn"),
         "pending_count": len(pending),
         "processed_count": len(processed),
         "failed_count": len(failed),
@@ -590,6 +616,8 @@ def _run_ingest_agent(
     *,
     model: str | None = None,
     max_turns: int | None = None,
+    max_tokens: int | None = None,
+    on_turn_start: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
@@ -613,9 +641,10 @@ def _run_ingest_agent(
         CFG_MANIFEST,
         INGEST_TOOLS,
         max_turns=max_turns or INGEST_LOOP_MAX_TURNS,
-        max_tokens=INGEST_LOOP_MAX_TOKENS,
+        max_tokens=max_tokens or INGEST_LOOP_MAX_TOKENS,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
+        on_turn_start=on_turn_start,
     )
 
 
@@ -628,9 +657,11 @@ def _run_ingest_agent(
         "Optional model overrides ANTHROPIC_INGEST_MODEL for this job (e.g. 'claude-sonnet-4-6' "
         "to fall back when the default ingest model is having issues). "
         "Optional max_turns sets the per-source turn budget for the agent loop "
-        "(default from INGEST_LOOP_MAX_TURNS env, currently 28). Bump it (e.g. max_turns=40) "
+        "(default from INGEST_LOOP_MAX_TURNS env, currently 35). Bump it (e.g. max_turns=40) "
         "when a source needs extensive cross-page reconciliation and previously failed with "
         "error 'max_turns_exceeded'. "
+        "INGEST_LOOP_MAX_TOKENS controls the per-turn output budget; if the model hits it, "
+        "the job fails with error 'output_token_limit_exceeded' rather than applying a truncated turn. "
         "If no captures exist yet, this can initialize a starter wiki scaffold (optional topic)."
     )
 )
@@ -702,6 +733,7 @@ def ingest(
             "mode": mode,
             "model": requested_model,
             "max_turns": requested_max_turns,
+            "max_tokens": INGEST_LOOP_MAX_TOKENS,
             "started_at": started,
             "updated_at": started,
             "finished_at": None,

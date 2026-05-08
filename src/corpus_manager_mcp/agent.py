@@ -249,6 +249,7 @@ def run_tool_loop(
     max_tokens: int = 16_384,
     retry_attempts: int = 3,
     retry_wait_seconds: int = 12,
+    on_turn_start: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     dispatch = _build_dispatch(root, manifest_path)
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
@@ -256,6 +257,11 @@ def run_tool_loop(
 
     retryable_exc = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
     for turn_index in range(max_turns):
+        if on_turn_start is not None:
+            try:
+                on_turn_start(turn_index)
+            except Exception:  # noqa: BLE001
+                pass
         last_exc: Exception | None = None
         resp = None
         for attempt in range(retry_attempts + 1):
@@ -312,6 +318,23 @@ def run_tool_loop(
 
         if text_parts:
             last_text = "\n".join(text_parts).strip()
+
+        if resp.stop_reason == "max_tokens":
+            return {
+                "ok": False,
+                "error": "output_token_limit_exceeded",
+                "error_detail": {
+                    "type": "OutputTokenLimitExceeded",
+                    "message": (
+                        "Anthropic stopped the turn because the max_tokens output budget was reached. "
+                        "No tool calls from this truncated turn were applied."
+                    ),
+                    "request": request_summary,
+                    "stop_reason": resp.stop_reason,
+                },
+                "summary_text": last_text,
+                "turns_used": turn_index + 1,
+            }
 
         messages.append({"role": "assistant", "content": resp.content})
 
