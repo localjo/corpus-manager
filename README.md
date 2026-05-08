@@ -8,9 +8,15 @@ Corpus Manager runs on your VPS and connects Claude.ai to your synced Obsidian v
 
 You chat with Claude naturally and use it to capture ideas, notes, and source material as they come up. Claude will store captured ideas in an Obsidian wiki in a "raw" source folder. You can also manually add notes and ideas to the raw folder by typing them directly into Obsidian, dragging or copying files into the folder, or even capturing web clips directly into the folder using a tool like [MarkDownload](https://addons.mozilla.org/en-US/firefox/addon/markdownload/).
 
+![Capturing a note and running ingest from a Claude conversation](docs/images/capture-and-ingest.png)
+
 After capturing many ideas, you can tell Claude to process those captures and ingest them into your wiki. The raw captures will remain untouched, and Claude will read them and integrate them into an organized knowledge base in the "wiki" folder.
 
+![Asking Claude a question that is answered from the wiki](docs/images/query-the-wiki.png)
+
 The wiki syncs to all of your devices, and you can view and edit it manually via Obsidian, or ask Claude questions about it via chat.
+
+![A wiki concept page open in Obsidian alongside the graph view showing cross-links](docs/images/wiki-in-obsidian.png)
 
 ## Getting Started
 
