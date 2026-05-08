@@ -28,6 +28,7 @@ from corpus_manager_mcp.vault_ops import (
     VaultPaths,
     append_operation_log,
     extract_wikilinks,
+    rebuild_wiki_index,
     traceability_warnings,
     vault_read,
 )
@@ -531,6 +532,18 @@ def stats() -> dict[str, Any]:
         "last_ingested_at": max(ingested) if ingested else None,
         "md_mcp": _md_mcp_ping(),
     }
+
+
+@MCP.tool(description="Regenerate wiki/index.md deterministically from the current wiki tree.")
+def rebuild_index() -> dict[str, Any]:
+    result = rebuild_wiki_index(CFG_ROOT)
+    append_operation_log(
+        CFG_ROOT,
+        "rebuild_index",
+        "wiki/index.md",
+        [f"rebuilt deterministic index with {result.get('page_count', 0)} pages"],
+    )
+    return result
 
 
 @MCP.tool(

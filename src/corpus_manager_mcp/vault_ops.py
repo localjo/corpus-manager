@@ -89,6 +89,62 @@ def wiki_write(root: Path, rel: str, content: str) -> dict[str, Any]:
     return {"ok": True, "path": rel, "bytes": len(content.encode("utf-8"))}
 
 
+def _wiki_page_title(path: Path) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    _, body = split_frontmatter(text)
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return path.stem.replace("-", " ").title()
+
+
+def rebuild_wiki_index(root: Path) -> dict[str, Any]:
+    """Regenerate wiki/index.md from the current wiki tree."""
+    wiki = root / "wiki"
+    wiki.mkdir(parents=True, exist_ok=True)
+
+    section_labels = {
+        "chapters": "Chapters",
+        "concepts": "Concepts",
+        "frameworks": "Frameworks",
+        "entities": "Entities",
+        "synthesis": "Synthesis",
+    }
+    section_order = ["chapters", "concepts", "frameworks", "entities", "synthesis"]
+    grouped: dict[str, list[tuple[str, str]]] = {section: [] for section in section_order}
+    grouped["other"] = []
+
+    for path in wiki.rglob("*.md"):
+        rel = str(path.relative_to(wiki)).replace("\\", "/")
+        if rel in {"index.md", "log.md"} or rel.startswith("log-archive/"):
+            continue
+        section = rel.split("/", 1)[0] if "/" in rel else "other"
+        if section not in grouped:
+            section = "other"
+        title = _wiki_page_title(path)
+        link = rel[:-3] if rel.endswith(".md") else rel
+        grouped[section].append((title, link))
+
+    lines = ["# Wiki Index", ""]
+    total_pages = 0
+    for section in [*section_order, "other"]:
+        entries = sorted(grouped[section], key=lambda item: item[0].lower())
+        if not entries:
+            continue
+        label = section_labels.get(section, "Other")
+        lines.extend([f"## {label}", ""])
+        for title, link in entries:
+            lines.append(f"- [[{link}|{title}]]")
+        lines.append("")
+        total_pages += len(entries)
+
+    index_path = wiki / "index.md"
+    content = "\n".join(lines).rstrip() + "\n"
+    index_path.write_text(content, encoding="utf-8")
+    return {"ok": True, "path": "wiki/index.md", "page_count": total_pages, "bytes": len(content.encode("utf-8"))}
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"sources": []}
