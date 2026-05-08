@@ -376,12 +376,13 @@ def _spawn_ingest_worker(job_id: str) -> None:
                         _save_ingest_jobs(doc)
                         return
                     rel = pending[0]
+                    job_model = job.get("model") or ANTHROPIC_INGEST_MODEL
                     job["status"] = "running"
                     job["current_source"] = rel
                     job["updated_at"] = _utc_now()
                     _save_ingest_jobs(doc)
 
-                result = _run_ingest_agent(rel)
+                result = _run_ingest_agent(rel, model=job_model)
 
                 with _INGEST_LOCK:
                     doc = _load_ingest_jobs()
@@ -453,6 +454,7 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
     return {
         "job_id": jid,
         "status": job.get("status"),
+        "model": job.get("model"),
         "started_at": job.get("started_at"),
         "updated_at": job.get("updated_at"),
         "finished_at": job.get("finished_at"),
@@ -570,7 +572,7 @@ def lint() -> dict[str, Any]:
     return {"deterministic": det, "narrative_report": narrative}
 
 
-def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
+def _run_ingest_agent(source_rel: str, *, model: str | None = None) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     read_out = vault_read(CFG_ROOT, source_rel)
@@ -586,7 +588,7 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
     )
     return run_tool_loop(
         CLIENT,
-        ANTHROPIC_INGEST_MODEL,
+        model or ANTHROPIC_INGEST_MODEL,
         system,
         user_msg,
         CFG_ROOT,
@@ -606,13 +608,16 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
         "If already running, returns progress. If the most recent run failed, returns the "
         "failure details so the caller can explain them; pass retry=True to start a fresh attempt. "
         "Optional filename targets a specific source. "
+        "Optional model overrides ANTHROPIC_INGEST_MODEL for this job (e.g. 'claude-sonnet-4-5' "
+        "to fall back when the default ingest model is having issues). "
         "If no captures exist yet, this can initialize a starter wiki scaffold (optional topic)."
     )
 )
-def ingest(filename: str = "", topic: str = "", retry: bool = False) -> dict[str, Any]:
+def ingest(filename: str = "", topic: str = "", retry: bool = False, model: str = "") -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     requested_filename = filename.strip()
+    requested_model = model.strip() or ANTHROPIC_INGEST_MODEL
     with _INGEST_LOCK:
         doc = _load_ingest_jobs()
         current_id, current_job = _get_job(doc)
@@ -667,6 +672,7 @@ def ingest(filename: str = "", topic: str = "", retry: bool = False) -> dict[str
             "job_id": job_id,
             "status": "queued",
             "mode": mode,
+            "model": requested_model,
             "started_at": started,
             "updated_at": started,
             "finished_at": None,

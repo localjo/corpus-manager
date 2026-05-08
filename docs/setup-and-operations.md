@@ -54,6 +54,8 @@ HOST_SYNCTHING_CONFIG_PATH=/opt/corpus-manager/syncthing-config
 ANTHROPIC_API_KEY=replace-me
 ANTHROPIC_MODEL=claude-sonnet-4-5
 ANTHROPIC_QUERY_MODEL=claude-sonnet-4-5
+# Optional: model used by ingest/deprecate. Defaults to ANTHROPIC_MODEL.
+ANTHROPIC_INGEST_MODEL=claude-opus-4-7
 
 HOST=0.0.0.0
 PORT=8765
