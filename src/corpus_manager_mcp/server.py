@@ -369,7 +369,7 @@ def _spawn_ingest_worker(job_id: str) -> None:
                         return
                     pending = list(job.get("pending_sources") or [])
                     if not pending:
-                        job["status"] = "completed"
+                        job["status"] = "failed" if job.get("errors") else "completed"
                         job["finished_at"] = _utc_now()
                         job["updated_at"] = _utc_now()
                         job["current_source"] = None
@@ -584,22 +584,34 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
 @MCP.tool(
     description=(
         "Process captured notes into the knowledge base in the background (start-or-report). "
-        "If already running, returns progress. Optional filename targets a specific source. "
+        "If already running, returns progress. If the most recent run failed, returns the "
+        "failure details so the caller can explain them; pass retry=True to start a fresh attempt. "
+        "Optional filename targets a specific source. "
         "If no captures exist yet, this can initialize a starter wiki scaffold (optional topic)."
     )
 )
-def ingest(filename: str = "", topic: str = "") -> dict[str, Any]:
+def ingest(filename: str = "", topic: str = "", retry: bool = False) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
+    requested_filename = filename.strip()
     with _INGEST_LOCK:
         doc = _load_ingest_jobs()
         current_id, current_job = _get_job(doc)
-        if current_id and current_job and current_job.get("status") in {"queued", "running"}:
-            payload = _ingest_status_payload(doc, current_id)
-            payload["message"] = "Ingest job already running."
-            return payload
+        if current_id and current_job:
+            current_status = current_job.get("status")
+            if current_status in {"queued", "running"}:
+                payload = _ingest_status_payload(doc, current_id)
+                payload["message"] = "Ingest job already running."
+                return payload
+            if current_status == "failed" and not retry and not requested_filename:
+                payload = _ingest_status_payload(doc, current_id)
+                payload["message"] = (
+                    "Previous ingest job failed. See errors_preview for details. "
+                    "Pass retry=True to start a new attempt, or pass filename=... to ingest a specific source."
+                )
+                return payload
 
-        requested = filename.strip()
+        requested = requested_filename
         if requested:
             rel = requested if requested.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{requested}"
             # Validate source path exists before creating a job.

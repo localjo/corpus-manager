@@ -7,7 +7,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from anthropic import Anthropic
+from anthropic import (
+    Anthropic,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
 from corpus_manager_mcp.vault_ops import (
     append_operation_log,
@@ -198,6 +204,7 @@ def run_tool_loop(
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
     last_text = ""
 
+    retryable_exc = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
     for _ in range(max_turns):
         last_exc: Exception | None = None
         resp = None
@@ -211,13 +218,13 @@ def run_tool_loop(
                     messages=messages,
                 )
                 break
-            except Exception as exc:  # noqa: BLE001
+            except retryable_exc as exc:
                 last_exc = exc
-                msg = str(exc).lower()
-                is_rate_limit = "rate_limit_error" in msg or "429" in msg or "rate limit" in msg
-                if not is_rate_limit or attempt >= retry_attempts:
+                if attempt >= retry_attempts:
                     return {"ok": False, "error": str(exc), "summary_text": last_text}
                 time.sleep(retry_wait_seconds * (attempt + 1))
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc), "summary_text": last_text}
         if resp is None and last_exc is not None:
             return {"ok": False, "error": str(last_exc), "summary_text": last_text}
 
