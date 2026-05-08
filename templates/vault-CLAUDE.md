@@ -31,6 +31,10 @@ raw notes are captured, then compiled into wiki pages for durable retrieval and 
 
 Each wiki page should include frontmatter with `type`, `sources`, `date_updated`, and tags.
 
+## Markdown conventions
+
+- When a wikilink with a display label (`[[path/to/file.md|Readable Title]]`) appears inside a markdown table cell, escape the `|` separator as `\|` (e.g. `[[path/to/file.md\|Readable Title]]`) so the table renderer doesn't treat it as a column boundary.
+
 ## Routing note
 
 Operational behavior for ingest/query/deprecate/verify/lint and MCP tool usage is defined in Corpus Manager server prompts and Skill docs.
