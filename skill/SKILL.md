@@ -22,7 +22,7 @@ When multiple vaults are configured, include `vault_id` in tool calls. If the us
 | -------------------- | -------- | ----- |
 | “Which vaults are configured?”, “List available vaults” | `list_corpora` | Use this when vault choice is ambiguous and multiple vaults are configured. |
 | “Capture this thought”, “Remember this”, “Store this note”, “Put this in my notes”, “Save this for later”, “Put this in my wiki” | `capture` | Save user-provided content for later processing into the knowledge base. |
-| “Process captured thoughts”, “Update the wiki”, “Sync my notes into the knowledge base”, “Run ingest”, “Process unprocessed files”, “Initialize my wiki” | `ingest` | Start-or-report background ingest. If already running, return status/progress. If no captures exist yet, can initialize a starter wiki scaffold. |
+| “Process captured thoughts”, “Update the wiki”, “Sync my notes into the knowledge base”, “Run ingest”, “Process unprocessed files”, “Initialize my wiki” | `ingest` | Start background ingest. After launching, tell the user it runs in background and may take 10-20 minutes; do not auto-check status unless asked. If no captures exist yet, can initialize a starter wiki scaffold. |
 | “Ingest this into the wiki”, “Process this file”, “Update from this source” | `ingest` | Use optional `filename` argument for targeted ingest when the user references a specific path/file. |
 | “Initialize my wiki around X”, “Start my knowledge base about X” | `ingest` | Use optional `topic` argument to seed first-time starter wiki scaffolding when the vault has no captures yet. |
 | “Try the ingest again”, “Retry the ingest”, “The previous ingest failed, run it again” | `ingest` | Pass `retry=true` to start a fresh attempt after a failed job. Without it, repeat calls return the previous failure so the user can see why it failed before retrying. |
@@ -43,7 +43,7 @@ When multiple vaults are configured, include `vault_id` in tool calls. If the us
 3. If more than one vault is configured, include `vault_id` in each vault-scoped tool call (`capture`, `ingest`, `stats`, `query`, `verify`, `lint`, `deprecate`, `direct_vault_op`, `rebuild_index`).
 4. If `vault_id` is missing/ambiguous in a multi-vault context, ask the user which vault to use or call `list_corpora` first.
 5. **Do not** claim files were edited unless the tool result indicates success.
-6. Treat `ingest` as both launcher and status endpoint: call it again to check progress.
+6. Treat `ingest` as both launcher and status endpoint. After starting ingest, do **not** call it repeatedly for status unless the user explicitly asks; instead tell the user it runs in the background and can take 10-20 minutes.
 7. If user asks for status and pending sources are non-zero, ask once whether they want to process captures now.
 8. If user asks a knowledge question, prefer `query` automatically even when they say “notes”, “memory”, “knowledge base”, or “second brain” instead of “wiki”.
 9. If `ingest` reports a previous failed job, summarize `errors_preview` for the user and offer to retry. If the failure looks model-specific (e.g. repeated 5xx from the API on one model), suggest retrying with a `model` fallback (e.g. `claude-sonnet-4-6`).

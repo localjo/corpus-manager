@@ -127,6 +127,8 @@ SERVER_INSTRUCTIONS = (
     "When multiple vaults are configured, require vault_id for vault-scoped operations; use list_corpora to discover available vaults. "
     "Use capture when users say capture/store/save/remember this, ingest when users say process/update/sync notes into the knowledge base, "
     "stats for status/what is pending, query for ask/find/what do my notes say, lint/verify for audits, and deprecate to retire a source. "
+    "After starting ingest, do not repeatedly poll status unless the user explicitly asks for a status check. "
+    "Acknowledge ingest runs in the background and may take a while. "
     "If users ask to initialize/start a brand-new wiki and there are no captures yet, ingest may create a starter scaffold (optionally topic-guided). "
     "Direct file reads are allowed when useful, but never perform direct file writes/moves unless the user explicitly requests a manual override for a specific file operation."
 )
@@ -823,6 +825,8 @@ def _run_ingest_agent(
 @MCP.tool(
     description=(
         "Process captured notes into the knowledge base in the background (start-or-report). "
+        "Do not auto-poll this tool after starting a job; only call again when the user explicitly requests status. "
+        "Inform users that ingest runs in the background and may take 10-20 minutes for larger vaults. "
         "If already running, returns progress. If the most recent run failed, returns the "
         "failure details so the caller can explain them; pass retry=True to start a fresh attempt. "
         "Optional filename targets a specific source. "
