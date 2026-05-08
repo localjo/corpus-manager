@@ -102,20 +102,28 @@ This starter structure is a bootstrap, not final content. After that, capture re
 ## Bootstrap a new vault (VPS)
 
 Corpus Manager includes a helper script to add a new vault and register it in YAML.
+It auto-detects sensible defaults for registry path and vault root (host vs container), so you usually only provide the vault name.
 
 Host invocation:
 
 ```bash
 cd /opt/corpus-manager
-python3 scripts/new-vault.py
+python3 scripts/new-vault.py "Festivals and Retreats"
 ```
 
 Container invocation:
 
 ```bash
 cd /opt/corpus-manager
-docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py
+docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py "Festivals and Retreats"
 ```
+
+Optional advanced flags:
+
+- `--vault-id festivals-and-retreats`
+- `--label "Festivals and Retreats"`
+- `--registry-path ...`
+- `--vaults-root ...`
 
 The script will:
 

@@ -165,18 +165,20 @@ When multiple vaults are configured, MCP calls must include `vault_id`.
 
 ### Bootstrap a new vault entry
 
+The script auto-detects default registry/root paths, so you can usually pass only the new vault name.
+
 Host:
 
 ```bash
 cd /opt/corpus-manager
-python3 scripts/new-vault.py
+python3 scripts/new-vault.py "Festivals and Retreats"
 ```
 
 Container:
 
 ```bash
 cd /opt/corpus-manager
-docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py
+docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py "Festivals and Retreats"
 ```
 
 After bootstrap:

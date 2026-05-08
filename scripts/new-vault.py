@@ -3,18 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 
 import yaml
-
-
-def prompt(text: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
-    value = input(f"{text}{suffix}: ").strip()
-    return value or default
 
 
 def normalize_slug(value: str) -> str:
@@ -28,16 +22,41 @@ def ensure_file(path: Path, content: str) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def main() -> None:
-    default_registry = Path("/data/corpus-registry.yaml")
-    registry_path = Path(prompt("Registry path", str(default_registry))).expanduser()
-    vaults_root = Path(prompt("Vaults root directory", "/data/vaults")).expanduser()
+def detect_defaults() -> tuple[Path, Path]:
+    running_in_container = Path("/.dockerenv").exists()
+    if running_in_container:
+        return Path("/data/corpus-registry.yaml"), Path("/data/vaults")
+    return Path("/opt/corpus-manager/corpus-registry.yaml"), Path("/srv/vaults")
 
-    raw_slug = prompt("New vault id (slug)")
-    slug = normalize_slug(raw_slug)
+
+def title_from_slug(slug: str) -> str:
+    words = [w for w in re.split(r"[-_.]+", slug) if w]
+    return " ".join(word.capitalize() for word in words) or slug
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create and register a new Corpus Manager vault.")
+    parser.add_argument("vault_name", nargs="?", help="Vault name or id, e.g. 'Festivals and Retreats'")
+    parser.add_argument("--vault-id", dest="vault_id", help="Explicit vault id/slug, e.g. festivals-and-retreats")
+    parser.add_argument("--label", help="Display label, defaults to title-cased vault id")
+    parser.add_argument("--registry-path", help="Override registry YAML path")
+    parser.add_argument("--vaults-root", help="Override root directory for new vault folders")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    default_registry, default_vaults_root = detect_defaults()
+    registry_path = Path(args.registry_path).expanduser() if args.registry_path else default_registry
+    vaults_root = Path(args.vaults_root).expanduser() if args.vaults_root else default_vaults_root
+
+    raw_input_name = (args.vault_id or args.vault_name or "").strip()
+    if not raw_input_name:
+        raw_input_name = input("Vault name (e.g. Festivals and Retreats): ").strip()
+    slug = normalize_slug(raw_input_name)
     if not slug:
         raise SystemExit("Error: vault id must contain at least one alphanumeric character.")
-    label = prompt("Display label", slug)
+    label = (args.label or "").strip() or title_from_slug(slug)
 
     vault_root = vaults_root / slug
     claude_md_path = vault_root / "CLAUDE.md"
@@ -47,7 +66,6 @@ def main() -> None:
     (vault_root / "raw").mkdir(parents=True, exist_ok=True)
     (vault_root / "wiki").mkdir(parents=True, exist_ok=True)
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
     ensure_file(
         claude_md_path,
         (
@@ -85,7 +103,7 @@ def main() -> None:
     registry_path.write_text(yaml.safe_dump(registry_doc, sort_keys=True), encoding="utf-8")
 
     print("")
-    print(f"Created vault '{slug}' at: {vault_root}")
+    print(f"Created vault '{slug}' ({label}) at: {vault_root}")
     print(f"Updated registry: {registry_path}")
     print("")
     print("Next steps:")
