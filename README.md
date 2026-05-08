@@ -72,6 +72,7 @@ HOST_SYNCTHING_CONFIG_PATH=/opt/corpus-manager/syncthing-config
 ANTHROPIC_API_KEY=replace-me
 ANTHROPIC_MODEL=claude-sonnet-4-5
 ANTHROPIC_QUERY_MODEL=claude-sonnet-4-5
+ANTHROPIC_INGEST_MODEL=claude-opus-4-1-20250805
 
 HOST=0.0.0.0
 PORT=8765
@@ -152,6 +153,15 @@ Then issue TLS certs with certbot.
    - `stats`
    - `capture`
    - `query`
+   - `ingest` (starts or reports background ingest)
+
+## Tool semantics
+
+- `ingest` is **start-or-report**:
+  - no arguments: start background ingest for all pending raw sources (or return running job status)
+  - with `filename`: targeted ingest for one source path (or return running job status if already active)
+- `ingest` prevents overlapping jobs; one ingest run is active at a time.
+- `verify` and `lint` are read-only audits.
 
 ## Syncthing setup
 

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
+import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,8 +49,9 @@ CFG_CLAUDE_MD = VP.claude_md
 
 SERVER_INSTRUCTIONS = (
     "Corpus Manager is a VPS-hosted second-brain server for markdown vault workflows. "
-    "Use capture to save quick notes into raw/, ingest/ingest_file to reconcile raw sources into wiki pages, "
-    "query for wiki-first answers, lint/verify for read-only audits, deprecate to retire sources, and stats for counts/health."
+    "Use capture to save quick notes into raw/, ingest to start-or-report background ingest jobs "
+    "(optional filename for targeted ingest), query for wiki-first answers, lint/verify for read-only audits, "
+    "deprecate to retire sources, and stats for counts/health."
 )
 
 MCP = FastMCP("Corpus Manager", instructions=SERVER_INSTRUCTIONS)
@@ -65,6 +69,9 @@ INGEST_LOOP_MAX_TOKENS = 2500
 INGEST_RATE_RETRY_ATTEMPTS = int(os.getenv("INGEST_RATE_RETRY_ATTEMPTS", "3"))
 INGEST_RATE_RETRY_WAIT_SECONDS = int(os.getenv("INGEST_RATE_RETRY_WAIT_SECONDS", "12"))
 INGEST_SOURCE_DELAY_SECONDS = 5
+INGEST_JOBS_PATH = CFG_WIKI / ".ingest-jobs.json"
+_INGEST_LOCK = threading.Lock()
+_INGEST_THREAD: threading.Thread | None = None
 
 
 def _resolve(path: str) -> Path:
@@ -241,6 +248,136 @@ def _md_mcp_ping() -> str:
         return f"md-mcp health check failed: {exc}"
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_ingest_jobs() -> dict[str, Any]:
+    if not INGEST_JOBS_PATH.exists():
+        return {"current_job_id": None, "jobs": {}}
+    try:
+        doc = json.loads(INGEST_JOBS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"current_job_id": None, "jobs": {}}
+    if not isinstance(doc, dict):
+        return {"current_job_id": None, "jobs": {}}
+    if "jobs" not in doc or not isinstance(doc["jobs"], dict):
+        doc["jobs"] = {}
+    if "current_job_id" not in doc:
+        doc["current_job_id"] = None
+    return doc
+
+
+def _save_ingest_jobs(doc: dict[str, Any]) -> None:
+    INGEST_JOBS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INGEST_JOBS_PATH.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _get_job(doc: dict[str, Any], job_id: str | None = None) -> tuple[str | None, dict[str, Any] | None]:
+    jobs = doc.get("jobs", {})
+    if not isinstance(jobs, dict):
+        return None, None
+    jid = job_id or doc.get("current_job_id")
+    if not jid:
+        return None, None
+    job = jobs.get(jid)
+    if not isinstance(job, dict):
+        return None, None
+    return jid, job
+
+
+def _spawn_ingest_worker(job_id: str) -> None:
+    def _worker() -> None:
+        try:
+            while True:
+                with _INGEST_LOCK:
+                    doc = _load_ingest_jobs()
+                    job = doc.get("jobs", {}).get(job_id)
+                    if not isinstance(job, dict):
+                        return
+                    pending = list(job.get("pending_sources") or [])
+                    if not pending:
+                        job["status"] = "completed"
+                        job["finished_at"] = _utc_now()
+                        job["updated_at"] = _utc_now()
+                        job["current_source"] = None
+                        _save_ingest_jobs(doc)
+                        return
+                    rel = pending[0]
+                    job["status"] = "running"
+                    job["current_source"] = rel
+                    job["updated_at"] = _utc_now()
+                    _save_ingest_jobs(doc)
+
+                result = _run_ingest_agent(rel)
+
+                with _INGEST_LOCK:
+                    doc = _load_ingest_jobs()
+                    job = doc.get("jobs", {}).get(job_id)
+                    if not isinstance(job, dict):
+                        return
+                    pending = list(job.get("pending_sources") or [])
+                    if pending and pending[0] == rel:
+                        pending = pending[1:]
+                    elif rel in pending:
+                        pending.remove(rel)
+                    job["pending_sources"] = pending
+                    job["processed_sources"] = list(job.get("processed_sources") or []) + [rel]
+                    job["results"] = list(job.get("results") or []) + [{"source": rel, **result}]
+                    job["updated_at"] = _utc_now()
+                    if not result.get("ok"):
+                        job["errors"] = list(job.get("errors") or []) + [
+                            {"source": rel, "error": result.get("error", "unknown")}
+                        ]
+                # keep going even if one source fails; run through full queue
+                    _save_ingest_jobs(doc)
+
+                if INGEST_SOURCE_DELAY_SECONDS > 0:
+                    time.sleep(INGEST_SOURCE_DELAY_SECONDS)
+
+            # unreachable
+        except Exception as exc:  # noqa: BLE001
+            with _INGEST_LOCK:
+                doc = _load_ingest_jobs()
+                job = doc.get("jobs", {}).get(job_id)
+                if isinstance(job, dict):
+                    job["status"] = "failed"
+                    job["updated_at"] = _utc_now()
+                    job["finished_at"] = _utc_now()
+                    job["errors"] = list(job.get("errors") or []) + [
+                        {"source": job.get("current_source"), "error": str(exc), "traceback": traceback.format_exc()}
+                    ]
+                    _save_ingest_jobs(doc)
+
+    global _INGEST_THREAD
+    t = threading.Thread(target=_worker, name=f"ingest-job-{job_id[:8]}", daemon=True)
+    _INGEST_THREAD = t
+    t.start()
+
+
+def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> dict[str, Any]:
+    jid, job = _get_job(doc, job_id)
+    if not jid or not job:
+        return {"status": "not_found", "message": "No ingest job found."}
+    pending = list(job.get("pending_sources") or [])
+    processed = list(job.get("processed_sources") or [])
+    errors = list(job.get("errors") or [])
+    return {
+        "job_id": jid,
+        "status": job.get("status"),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+        "finished_at": job.get("finished_at"),
+        "current_source": job.get("current_source"),
+        "pending_count": len(pending),
+        "processed_count": len(processed),
+        "pending_sources_preview": pending[:20],
+        "processed_sources_preview": processed[-20:],
+        "error_count": len(errors),
+        "errors_preview": errors[-5:],
+    }
+
+
 @MCP.tool(
     description="Show vault health and counts: total/active/deprecated sources, pending raw files, wiki page count, and md-mcp reachability."
 )
@@ -374,43 +511,73 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
 
 
 @MCP.tool(
-    description="Run full ingest over pending raw/ sources. Reconciles wiki pages in place, updates manifest provenance, and appends operation logs."
+    description=(
+        "Start ingest as a background job if none is running; otherwise return current ingest progress/status. "
+        "Optional filename runs targeted ingest for one source path. Without filename, ingests all pending raw/ sources."
+    )
 )
-def ingest() -> dict[str, Any]:
+def ingest(filename: str = "") -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
-    pending = _pending_sources()
-    if not pending:
-        return {
-            "pending_count": 0,
-            "sources_processed": [],
+    with _INGEST_LOCK:
+        doc = _load_ingest_jobs()
+        current_id, current_job = _get_job(doc)
+        if current_id and current_job and current_job.get("status") in {"queued", "running"}:
+            payload = _ingest_status_payload(doc, current_id)
+            payload["message"] = "Ingest job already running."
+            return payload
+
+        requested = filename.strip()
+        if requested:
+            rel = requested if requested.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{requested}"
+            # Validate source path exists before creating a job.
+            read_out = vault_read(CFG_ROOT, rel, max_bytes=2_000)
+            if not read_out.get("ok"):
+                return {"status": "error", "message": read_out.get("error", "invalid source path"), "filename": rel}
+            if read_out.get("missing"):
+                return {"status": "error", "message": f"Source file not found: {rel}", "filename": rel}
+            pending = [rel]
+            mode = "single"
+        else:
+            pending = _pending_sources()
+            mode = "full"
+        if not pending:
+            payload = _ingest_status_payload(doc, current_id) if current_id else {"status": "completed"}
+            payload["message"] = "No pending sources."
+            payload["pending_count"] = 0
+            payload["traceability_warnings"] = traceability_warnings(CFG_ROOT)
+            return payload
+
+        job_id = f"ingest-{uuid.uuid4().hex[:12]}"
+        started = _utc_now()
+        doc["current_job_id"] = job_id
+        doc["jobs"][job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "mode": mode,
+            "started_at": started,
+            "updated_at": started,
+            "finished_at": None,
+            "current_source": None,
+            "pending_sources": pending,
+            "processed_sources": [],
             "results": [],
-            "traceability_warnings": traceability_warnings(CFG_ROOT),
+            "errors": [],
+            "pending_at_start": len(pending),
         }
+        _save_ingest_jobs(doc)
 
-    results: list[dict[str, Any]] = []
-    for idx, rel in enumerate(pending):
-        results.append({"source": rel, **_run_ingest_agent(rel)})
-        if INGEST_SOURCE_DELAY_SECONDS > 0 and idx < len(pending) - 1:
-            time.sleep(INGEST_SOURCE_DELAY_SECONDS)
-
-    warnings = traceability_warnings(CFG_ROOT)
-    return {
-        "pending_count": len(pending),
-        "sources_processed": pending,
-        "results": results,
-        "traceability_warnings": warnings,
-    }
+    _spawn_ingest_worker(job_id)
+    with _INGEST_LOCK:
+        payload = _ingest_status_payload(_load_ingest_jobs(), job_id)
+    payload["message"] = "Ingest job started in background."
+    payload["mode"] = mode
+    if mode == "single":
+        payload["filename"] = pending[0]
+    return payload
 
 
-@MCP.tool(
-    description="Run targeted ingest for a single source file path (raw/, drafts/, or manuscript/) and reconcile affected wiki/manifest state."
-)
-def ingest_file(filename: str) -> dict[str, Any]:
-    rel = filename if filename.startswith(("raw/", "drafts/", "manuscript/")) else f"raw/{filename}"
-    out = _run_ingest_agent(rel)
-    warnings = traceability_warnings(CFG_ROOT)
-    return {"source": rel, **out, "traceability_warnings": warnings}
+# NOTE: targeted ingest is now handled by ingest(filename=...).
 
 
 @MCP.tool(
