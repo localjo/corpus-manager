@@ -22,7 +22,6 @@ Recommended baseline VPS (what this project was tested on): DigitalOcean Basic D
 - `docker-compose.yml` - deployment stack
 - `.env.example` - required environment variables
 - `skill/` - uploadable Claude Skill files
-- `docs/md-mcp-integration.md` - transport decision notes
 
 ## Deploy on VPS
 
@@ -38,9 +37,11 @@ cd /opt/corpus-manager
 
 cp .env.example .env
 sudo mkdir -p /srv/vault
+sudo mkdir -p /srv/vaults
+sudo touch /opt/corpus-manager/corpus-registry.yaml
 sudo mkdir -p /opt/corpus-manager/syncthing-config
-sudo chown -R 1000:1000 /srv/vault /opt/corpus-manager/syncthing-config
-sudo chmod -R 775 /srv/vault /opt/corpus-manager/syncthing-config
+sudo chown -R 1000:1000 /srv/vault /srv/vaults /opt/corpus-manager/syncthing-config /opt/corpus-manager/corpus-registry.yaml
+sudo chmod -R 775 /srv/vault /srv/vaults /opt/corpus-manager/syncthing-config
 ```
 
 ### 2) Configure `.env`
@@ -49,6 +50,9 @@ sudo chmod -R 775 /srv/vault /opt/corpus-manager/syncthing-config
 VAULT_ROOT=/data/vault
 CLAUDE_MD_PATH=/data/vault/CLAUDE.md
 HOST_VAULT_PATH=/srv/vault
+HOST_VAULTS_PATH=/srv/vaults
+HOST_CORPUS_REGISTRY_PATH=/opt/corpus-manager/corpus-registry.yaml
+CORPUS_REGISTRY_PATH=/data/corpus-registry.yaml
 HOST_SYNCTHING_CONFIG_PATH=/opt/corpus-manager/syncthing-config
 
 ANTHROPIC_API_KEY=replace-me
@@ -64,8 +68,6 @@ HOST=0.0.0.0
 PORT=8765
 MCP_PATH=/mcp
 MCP_BEARER_TOKEN=replace-me
-
-MD_MCP_HTTP_URL=http://markdown-vault-mcp:8000
 ```
 
 Generate a bearer token:
@@ -85,7 +87,6 @@ docker compose ps
 Expected services:
 
 - `corpus-manager-mcp`
-- `markdown-vault-mcp`
 - `corpus-syncthing`
 
 ## TLS reverse proxy
@@ -144,13 +145,53 @@ Important:
 
 > WARNING! Initial ingest cost may be expensive. Ballpark: 100k to 1M+ tokens. No guarantees are made, so be sure you have appropriate token limits in place before running an ingest.
 
+## Multi-vault setup
+
+Corpus Manager can manage multiple vault folders from one install. Registry entries map each `vault_id` to a vault root.
+
+Example `corpus-registry.yaml`:
+
+```yaml
+corpora:
+  main:
+    vault_root: /data/vault
+    label: "Primary vault"
+  jungle:
+    vault_root: /data/vaults/jungle
+    label: "The Jungle"
+```
+
+When multiple vaults are configured, MCP calls must include `vault_id`.
+
+### Bootstrap a new vault entry
+
+Host:
+
+```bash
+cd /opt/corpus-manager
+python3 scripts/new-vault.py
+```
+
+Container:
+
+```bash
+cd /opt/corpus-manager
+docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py
+```
+
+After bootstrap:
+
+1. Add the new folder to Syncthing on each device.
+2. Restart the Corpus Manager container so it reloads registry YAML.
+
 ## Syncthing setup
 
 ### VPS side
 
 - Open Syncthing UI at `http://<VPS-IP>:8384`
-- Folder path inside Syncthing container:
-  - `/var/syncthing/Vault`
+- Folder paths inside Syncthing container:
+  - `/var/syncthing/Vault` (legacy primary vault)
+  - `/var/syncthing/Vaults/<vault-id>` (additional vaults)
 
 ### Mac side
 
@@ -186,7 +227,6 @@ docker compose up -d --build --force-recreate corpus-manager-mcp
 
 ```bash
 docker logs --tail 100 corpus-manager-mcp
-docker logs --tail 100 markdown-vault-mcp
 docker logs --tail 100 corpus-syncthing
 ```
 

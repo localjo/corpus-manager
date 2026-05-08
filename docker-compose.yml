@@ -6,23 +6,10 @@ services:
       - .env
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
+      - ${HOST_VAULTS_PATH:-./vaults}:/data/vaults
+      - ${HOST_CORPUS_REGISTRY_PATH:-./corpus-registry.yaml}:/data/corpus-registry.yaml
     ports:
       - "${PORT:-8765}:8765"
-    depends_on:
-      - markdown-vault-mcp
-    restart: unless-stopped
-
-  markdown-vault-mcp:
-    image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
-    container_name: markdown-vault-mcp
-    command: ["markdown-vault-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      MARKDOWN_VAULT_MCP_SOURCE_DIR: /data/vault
-    volumes:
-      - ${HOST_VAULT_PATH:-./vault}:/data/vault
-      - markdown-vault-state:/data/state
-    expose:
-      - "8000"
     restart: unless-stopped
 
   syncthing:
@@ -35,8 +22,6 @@ services:
       - "21027:21027/udp"
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/var/syncthing/Vault
+      - ${HOST_VAULTS_PATH:-./vaults}:/var/syncthing/Vaults
       - ${HOST_SYNCTHING_CONFIG_PATH:-./syncthing-config}:/var/syncthing/config
     restart: unless-stopped
-
-volumes:
-  markdown-vault-state:

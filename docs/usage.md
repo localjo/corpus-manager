@@ -14,6 +14,16 @@ Use a simple sequence:
 
 If processing is already running, asking to process again returns status instead of starting a second overlapping run.
 
+## Multi-vault routing
+
+- If only one vault is configured on the server, Claude can call tools without `vault_id`.
+- If multiple vaults are configured, Claude must include `vault_id` on vault-scoped tool calls.
+- If vault choice is unclear, ask Claude to list vaults first:
+  - "List configured vaults."
+  - "Which vault ids are available?"
+- You can set a project default in instructions, for example:
+  - "Default vault id for Corpus Manager is `main`."
+
 ## Natural-language examples
 
 ### Capture / remember
@@ -77,6 +87,7 @@ Direct reads can be used when useful. Direct writes/moves are intentionally guar
 - Quality checks -> `lint` / `verify`
 - Retirement intents -> `deprecate`
 - Direct file reads and explicit manual direct-file mutations -> `direct_vault_op`
+- Vault discovery in multi-vault deployments -> `list_corpora`
 
 ## First-time initialization behavior
 
@@ -87,3 +98,33 @@ You can optionally provide a topic in the request, for example:
 - "Initialize my wiki around mycelial network research."
 
 This starter structure is a bootstrap, not final content. After that, capture real notes in `raw/` and run ingest again to build substantive pages.
+
+## Bootstrap a new vault (VPS)
+
+Corpus Manager includes a helper script to add a new vault and register it in YAML.
+
+Host invocation:
+
+```bash
+cd /opt/corpus-manager
+python3 scripts/new-vault.py
+```
+
+Container invocation:
+
+```bash
+cd /opt/corpus-manager
+docker compose run --rm corpus-manager-mcp python3 scripts/new-vault.py
+```
+
+The script will:
+
+- Prompt for vault id and optional display label.
+- Create `raw/`, `wiki/`, `manifest.json`, and `CLAUDE.md`.
+- Add the vault entry to `CORPUS_REGISTRY_PATH` (default `/data/corpus-registry.yaml`).
+
+After running it:
+
+1. Add the new folder to Syncthing on all devices.
+2. Restart `corpus-manager-mcp` so the updated registry loads.
+3. Use the new `vault_id` in chat (or set a project default).

@@ -4,6 +4,8 @@
 
 Corpus Manager runs on your VPS and connects Claude.ai to your synced Obsidian vault, giving you a natural-language workflow to capture ideas, process them into structured wiki knowledge, and query that knowledge later without being tied to a single device. It follows [the "second brain" LLM wiki pattern popularized by Andrej Karpathy](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
+Corpus Manager also supports multiple vaults from a single install using a YAML registry. In multi-vault setups, Claude routes requests by `vault_id` (or a project default). Direct file operations remain built into Corpus Manager via `direct_vault_op`; no separate markdown MCP sidecar is required.
+
 ## How It Works
 
 You chat with Claude naturally and use it to capture ideas, notes, and source material as they come up. Claude will store captured ideas in an Obsidian wiki in a "raw" source folder. You can also manually add notes and ideas to the raw folder by typing them directly into Obsidian, dragging or copying files into the folder, or even capturing web clips directly into the folder using a tool like [MarkDownload](https://addons.mozilla.org/en-US/firefox/addon/markdownload/).

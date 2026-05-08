@@ -118,8 +118,11 @@ synced vault.
   only the server container. Don't recreate the `syncthing` service casually
   — that has caused `syncthing-config/` data loss before. The fix is to
   bind-mount Syncthing state under `/srv/`, not under `/opt/corpus-manager/`.
-- The vault path inside the `corpus-manager-mcp` container is `/data/vault`
-  (`VAULT_ROOT`), not the host path. Don't hardcode host paths in code.
+- Vault paths inside the container are logical IDs resolved from the YAML
+  registry (`CORPUS_REGISTRY_PATH`). `VAULT_ROOT` / `CLAUDE_MD_PATH` are
+  legacy single-vault fallbacks when no registry file is configured.
+- There is no separate markdown sidecar in the default stack. Direct file
+  operations are handled through `direct_vault_op` and `vault_ops`.
 
 ## Things to avoid
 
