@@ -43,7 +43,6 @@ def _request_summary(
     *,
     model: str,
     max_tokens: int,
-    temperature: float,
     system: str,
     tools: list[dict[str, Any]],
     messages: list[dict[str, Any]],
@@ -52,7 +51,6 @@ def _request_summary(
     return {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "turn_index": turn_index,
         "message_count": len(messages),
         "system_chars": len(system),
@@ -249,7 +247,6 @@ def run_tool_loop(
     *,
     max_turns: int = 28,
     max_tokens: int = 16_384,
-    temperature: float = 0,
     retry_attempts: int = 3,
     retry_wait_seconds: int = 12,
 ) -> dict[str, Any]:
@@ -265,7 +262,6 @@ def run_tool_loop(
             request_summary = _request_summary(
                 model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 system=system,
                 tools=tools,
                 messages=messages,
@@ -275,7 +271,6 @@ def run_tool_loop(
                 resp = client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
-                    temperature=temperature,
                     system=system,
                     tools=tools,
                     messages=messages,

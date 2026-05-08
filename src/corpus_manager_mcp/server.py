@@ -61,7 +61,6 @@ CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROP
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 ANTHROPIC_QUERY_MODEL = os.getenv("ANTHROPIC_QUERY_MODEL", "claude-sonnet-4-5")
 ANTHROPIC_INGEST_MODEL = os.getenv("ANTHROPIC_INGEST_MODEL", ANTHROPIC_MODEL)
-ANTHROPIC_INGEST_TEMPERATURE = float(os.getenv("ANTHROPIC_INGEST_TEMPERATURE", "0"))
 MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
 INGEST_SOURCE_CHAR_LIMIT = int(os.getenv("INGEST_SOURCE_CHAR_LIMIT", "6000"))
 INGEST_CLAUDE_MD_CHAR_LIMIT = int(os.getenv("INGEST_CLAUDE_MD_CHAR_LIMIT", "8000"))
@@ -596,7 +595,6 @@ def _run_ingest_agent(source_rel: str, *, model: str | None = None) -> dict[str,
         INGEST_TOOLS,
         max_turns=INGEST_LOOP_MAX_TURNS,
         max_tokens=INGEST_LOOP_MAX_TOKENS,
-        temperature=ANTHROPIC_INGEST_TEMPERATURE,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )
@@ -725,7 +723,6 @@ def deprecate(filename: str, reason: str) -> dict[str, Any]:
         DEPRECATE_TOOLS,
         max_turns=INGEST_LOOP_MAX_TURNS,
         max_tokens=INGEST_LOOP_MAX_TOKENS,
-        temperature=ANTHROPIC_INGEST_TEMPERATURE,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )
