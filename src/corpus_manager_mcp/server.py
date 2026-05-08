@@ -236,16 +236,24 @@ def _run_model(prompt: str, model: str) -> str:
 
 
 OP_RULES = """
-Karpathy-style wiki (operational layer):
-- raw/ is read-only for automation; wiki/ and manifest.json are maintained by ingest tools.
-- Never write to manuscript/ or drafts/ unless the user explicitly requested it (tools do not allow it).
-- manuscript/ and drafts/ outrank raw/ when both address the same factual claims; surface conflicts with warning callouts, never silent merges.
-- Use YAML frontmatter on wiki pages: type, book, sources, date_updated, tags as appropriate.
-- Wikilinks [[like/this]] aggressively; first mention should link.
+Karpathy-style wiki pattern (VPS + MCP adaptation):
+- This server maintains a persistent wiki artifact under the selected vault, not one-off RAG answers.
+- Source layers:
+  - raw/ is source material and read-only for automation.
+  - wiki/ is compiled, cross-linked knowledge maintained by tools.
+  - manifest.json tracks provenance and ingest/deprecation state.
+- Default writable scope is wiki/, manifest.json, and CLAUDE.md only.
+- Keep manual wiki corrections unless source truth clearly supersedes them.
+- Use concise, factual language by default.
+- Use YAML frontmatter on wiki pages with at least: type, sources, date_updated, tags.
+- Default page categories are entity, concept, and synthesis unless vault-specific rules define additional types.
+- Use wikilinks aggressively with human-readable aliases: [[path/to/file.md|Readable Title]].
+- Inside markdown tables, escape the alias pipe to avoid breaking table columns: [[path/to/file.md\\|Readable Title]].
+- Surface unresolved source contradictions explicitly; never silently merge conflicting claims.
 - Reconcile in place; do not duplicate pages.
-- After editing wiki pages, call manifest_upsert_source with the source filename and full wiki_pages list (paths relative to wiki/, no wiki/ prefix).
+- After wiki edits, call manifest_upsert_source with full wiki_pages (paths relative to wiki/, no wiki/ prefix).
 - Update wiki/index.md when adding navigable pages.
-- Finish by append_operation_log with bullets listing wiki paths touched and manifest updated.
+- Finish by append_operation_log with bullets listing wiki paths touched and manifest updates.
 
 Tool-use efficiency (does not affect output quality):
 - When you need several independent reads, issue them as parallel tool_use blocks in a single message (e.g. multiple vault_reads at once, or vault_read + manifest_get_source together) rather than one tool call per turn.
