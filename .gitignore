@@ -27,6 +27,8 @@ env/
 vault/
 test-vault/
 syncthing-config/
+corpus-registry.yaml
+corpus-registry.yml
 
 # Build/log artifacts
 build/
