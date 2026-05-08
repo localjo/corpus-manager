@@ -60,6 +60,14 @@ If processing is already running, asking to process again returns status instead
 
 - "Deprecate `raw/old-outline.md` because it is obsolete."
 
+### Direct file access and manual override
+
+- "Read this file directly: `wiki/chapters/what-did-you-say-to-her.md`."
+- "Manual override: directly update `wiki/concepts/consent-repair.md` with this exact content."
+- "Manual override: move `wiki/concepts/old-name.md` to `wiki/concepts/new-name.md`."
+
+Direct reads can be used when useful. Direct writes/moves are intentionally guarded and should be used only for explicit manual override requests. For write/move operations, the tool reason must include the exact phrase `manual override requested`.
+
 ## What Claude routes behind the scenes
 
 - Capture intents -> `capture`
@@ -68,6 +76,7 @@ If processing is already running, asking to process again returns status instead
 - Knowledge questions -> `query`
 - Quality checks -> `lint` / `verify`
 - Retirement intents -> `deprecate`
+- Direct file reads and explicit manual direct-file mutations -> `direct_vault_op`
 
 ## First-time initialization behavior
 

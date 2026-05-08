@@ -30,6 +30,8 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 | “Audit this page”, “Verify this entry against sources” | `verify` | Read-only source-grounding check for one page. |
 | “Run health check”, “Find broken links or consistency issues” | `lint` | Read-only quality check, no auto-fix. |
 | “Retire this source”, “Deprecate this file because it’s obsolete” | `deprecate` | Requires `filename` and `reason`. |
+| “Read this specific file directly”, “Show me this wiki file as-is” | `direct_vault_op` | Use `operation="read"` and `path=...` for direct read-only file access when requested. |
+| “Manual override requested: directly update this wiki file”, “Manual override requested: move this wiki file” | `direct_vault_op` | Use `operation="write"` or `operation="move"` only for explicit manual override requests; must pass `explicit_request=true` and include phrase `manual override requested` in `reason`. |
 
 ## Routing rules
 
@@ -41,6 +43,8 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 6. If user asks a knowledge question, prefer `query` automatically even when they say “notes”, “memory”, “knowledge base”, or “second brain” instead of “wiki”.
 7. If `ingest` reports a previous failed job, summarize `errors_preview` for the user and offer to retry. If the failure looks model-specific (e.g. repeated 5xx from the API on one model), suggest retrying with a `model` fallback (e.g. `claude-sonnet-4-6`).
 8. If `errors_preview` shows `error="max_turns_exceeded"`, the per-source agent budget was hit. Surface `last_summary_text` (what the model was doing when cut off) and the `remedy` field, then offer to retry with a higher `max_turns` (e.g. `retry=true, max_turns=40`). If the model was already deep into the work (writing index/manifest) when cut off, retrying with a moderate bump (e.g. 35–40) is usually enough.
+9. For direct file operations, prefer `direct_vault_op(operation="read")` for inspection requests. Do not use direct mutation (`write`/`move`) unless the user explicitly requests manual override for that exact action.
+10. Requests like “add this to the wiki” should route to `capture`/`ingest`, not direct mutation tools.
 
 ## Vault assumptions
 
@@ -52,3 +56,4 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 
 - Never write outside the vault root exposed as `VAULT_ROOT` on the server.
 - Prefer wiki citations in answers; use raw/drafts/manuscript only when the user asks for verification or exact sourcing.
+- Direct mutation guardrail: only use `direct_vault_op` mutation modes when the user explicitly requests manual override, and include `manual override requested` in `reason`.

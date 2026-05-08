@@ -53,7 +53,8 @@ SERVER_INSTRUCTIONS = (
     "Users may say wiki, notes, knowledge base, second brain, memory, or vault. "
     "Use capture when users say capture/store/save/remember this, ingest when users say process/update/sync notes into the knowledge base, "
     "stats for status/what is pending, query for ask/find/what do my notes say, lint/verify for audits, and deprecate to retire a source. "
-    "If users ask to initialize/start a brand-new wiki and there are no captures yet, ingest may create a starter scaffold (optionally topic-guided)."
+    "If users ask to initialize/start a brand-new wiki and there are no captures yet, ingest may create a starter scaffold (optionally topic-guided). "
+    "Direct file reads are allowed when useful, but never perform direct file writes/moves unless the user explicitly requests a manual override for a specific file operation."
 )
 
 MCP = FastMCP("Corpus Manager", instructions=SERVER_INSTRUCTIONS)
@@ -804,6 +805,92 @@ def deprecate(filename: str, reason: str) -> dict[str, Any]:
     )
     warnings = traceability_warnings(CFG_ROOT)
     return {"source": rel, **out, "traceability_warnings": warnings}
+
+
+@MCP.tool(
+    description=(
+        "Direct vault file operations for exceptional/manual tasks. "
+        "read is allowed without override. "
+        "write/move are manual-override operations and require explicit_request=True, "
+        "a non-empty reason, and reason text containing 'manual override requested'."
+    )
+)
+def direct_vault_op(
+    operation: str,
+    path: str,
+    explicit_request: bool = False,
+    reason: str = "",
+    content: str = "",
+    destination_path: str = "",
+) -> dict[str, Any]:
+    op = operation.strip().lower()
+    rel = path.replace("\\", "/").lstrip("/")
+    why = reason.strip()
+    if op not in {"read", "write", "move"}:
+        return {"ok": False, "error": "operation must be 'read', 'write', or 'move'"}
+    if op == "read":
+        read_out = vault_read(CFG_ROOT, rel)
+        return {"ok": bool(read_out.get("ok")), "operation": op, **read_out}
+
+    # Mutation modes are intentionally narrow and explicit.
+    if not explicit_request:
+        return {"ok": False, "error": f"direct {op} denied: explicit_request must be true"}
+    if not why:
+        return {"ok": False, "error": f"direct {op} denied: reason is required"}
+    if "manual override requested" not in why.lower():
+        return {
+            "ok": False,
+            "error": (
+                f"direct {op} denied: reason must include "
+                "'manual override requested'"
+            ),
+        }
+    if not rel.startswith("wiki/"):
+        return {
+            "ok": False,
+            "error": f"direct {op} is only allowed under wiki/",
+            "path": rel,
+        }
+
+    if op == "write":
+        if not content.strip():
+            return {"ok": False, "error": "content is required for write operations", "path": rel}
+        write_out = wiki_write(CFG_ROOT, rel, content)
+        if not write_out.get("ok"):
+            return {"ok": False, "operation": op, "reason": why, **write_out}
+        append_operation_log(
+            CFG_ROOT,
+            "manual_override",
+            rel,
+            [f"direct_vault_op write requested explicitly: {why}"],
+        )
+        return {"ok": True, "operation": op, "path": rel, "bytes": len(content.encode("utf-8"))}
+
+    dest_rel = destination_path.replace("\\", "/").lstrip("/")
+    if not dest_rel:
+        return {"ok": False, "error": "destination_path is required for move", "path": rel}
+    if not dest_rel.startswith("wiki/"):
+        return {
+            "ok": False,
+            "error": "direct move destination must be under wiki/",
+            "destination_path": dest_rel,
+        }
+    try:
+        src = _resolve(rel)
+        dst = _resolve(dest_rel)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": rel, "destination_path": dest_rel}
+    if not src.exists():
+        return {"ok": False, "error": "source file not found", "path": rel}
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    append_operation_log(
+        CFG_ROOT,
+        "manual_override",
+        rel,
+        [f"direct_vault_op move requested explicitly: {why}", f"moved to `{dest_rel}`"],
+    )
+    return {"ok": True, "operation": op, "from": rel, "to": dest_rel}
 
 
 def main() -> None:
