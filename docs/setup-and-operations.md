@@ -166,6 +166,7 @@ When multiple vaults are configured, MCP calls must include `vault_id`.
 ### Bootstrap a new vault entry
 
 The script auto-detects default registry/root paths, so you can usually pass only the new vault name.
+It also writes `CLAUDE.md` from `templates/vault-CLAUDE.md`.
 
 Host:
 
@@ -185,6 +186,12 @@ After bootstrap:
 
 1. Add the new folder to Syncthing on each device.
 2. Restart the Corpus Manager container so it reloads registry YAML.
+
+To update `CLAUDE.md` in an already-registered vault from template:
+
+```bash
+python3 scripts/new-vault.py "Festivals and Retreats" --overwrite-claude-md
+```
 
 ## Syncthing setup
 

@@ -131,6 +131,14 @@ The script will:
 - Create `raw/`, `wiki/`, `manifest.json`, and `CLAUDE.md`.
 - Add the vault entry to `CORPUS_REGISTRY_PATH` (default `/data/corpus-registry.yaml`).
 
+`CLAUDE.md` is generated from `templates/vault-CLAUDE.md` so new vaults get full process/routing guidance.
+
+If you already created a vault and want to refresh its `CLAUDE.md` from template:
+
+```bash
+python3 scripts/new-vault.py "Festivals and Retreats" --overwrite-claude-md
+```
+
 After running it:
 
 1. Add the new folder to Syncthing on all devices.

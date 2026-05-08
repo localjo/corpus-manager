@@ -41,7 +41,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label", help="Display label, defaults to title-cased vault id")
     parser.add_argument("--registry-path", help="Override registry YAML path")
     parser.add_argument("--vaults-root", help="Override root directory for new vault folders")
+    parser.add_argument("--claude-template", help="Path to CLAUDE.md template file")
+    parser.add_argument(
+        "--overwrite-claude-md",
+        action="store_true",
+        help="Overwrite CLAUDE.md for an existing vault entry using template",
+    )
     return parser.parse_args()
+
+
+def default_template_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "templates" / "vault-CLAUDE.md"
+
+
+def render_claude_template(template_path: Path, vault_label: str) -> str:
+    text = template_path.read_text(encoding="utf-8")
+    rendered = text.replace("{{VAULT_LABEL}}", vault_label)
+    if not rendered.endswith("\n"):
+        rendered += "\n"
+    return rendered
 
 
 def main() -> None:
@@ -58,28 +76,9 @@ def main() -> None:
         raise SystemExit("Error: vault id must contain at least one alphanumeric character.")
     label = (args.label or "").strip() or title_from_slug(slug)
 
-    vault_root = vaults_root / slug
-    claude_md_path = vault_root / "CLAUDE.md"
-    manifest_path = vault_root / "manifest.json"
-
-    vault_root.mkdir(parents=True, exist_ok=True)
-    (vault_root / "raw").mkdir(parents=True, exist_ok=True)
-    (vault_root / "wiki").mkdir(parents=True, exist_ok=True)
-
-    ensure_file(
-        claude_md_path,
-        (
-            "# Vault Rules\n\n"
-            "This vault follows the Corpus Manager wiki workflow.\n\n"
-            "## Layers\n\n"
-            "- `raw/` source material\n"
-            "- `wiki/` compiled knowledge\n"
-            "- `manifest.json` source tracking\n"
-        ),
-    )
-    ensure_file(manifest_path, json.dumps({"sources": []}, indent=2) + "\n")
-    ensure_file((vault_root / "wiki" / "index.md"), "# Wiki Index\n\n")
-    ensure_file((vault_root / "wiki" / "log.md"), "# Wiki Log\n\n")
+    template_path = Path(args.claude_template).expanduser() if args.claude_template else default_template_path()
+    if not template_path.exists():
+        raise SystemExit(f"Error: CLAUDE.md template not found at {template_path}")
 
     if registry_path.exists():
         registry_doc = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
@@ -91,19 +90,46 @@ def main() -> None:
     if not isinstance(corpora, dict):
         corpora = {}
         registry_doc["corpora"] = corpora
-    if slug in corpora:
-        raise SystemExit(f"Error: vault id '{slug}' already exists in {registry_path}")
-    corpora[slug] = {
-        "vault_root": str(vault_root),
-        "claude_md": str(claude_md_path),
-        "label": label,
-    }
+    existing = corpora.get(slug) if isinstance(corpora.get(slug), dict) else None
+    if existing and not args.overwrite_claude_md:
+        raise SystemExit(
+            f"Error: vault id '{slug}' already exists in {registry_path}. "
+            "Re-run with --overwrite-claude-md to refresh CLAUDE.md from template."
+        )
+
+    if existing:
+        vault_root = Path(str(existing.get("vault_root", vaults_root / slug))).expanduser()
+        claude_md_path = Path(str(existing.get("claude_md", vault_root / "CLAUDE.md"))).expanduser()
+        label = str(existing.get("label", label)).strip() or label
+    else:
+        vault_root = vaults_root / slug
+        claude_md_path = vault_root / "CLAUDE.md"
+        corpora[slug] = {
+            "vault_root": str(vault_root),
+            "claude_md": str(claude_md_path),
+            "label": label,
+        }
+
+    manifest_path = vault_root / "manifest.json"
+    vault_root.mkdir(parents=True, exist_ok=True)
+    (vault_root / "raw").mkdir(parents=True, exist_ok=True)
+    (vault_root / "wiki").mkdir(parents=True, exist_ok=True)
+
+    template_text = render_claude_template(template_path, label)
+    if args.overwrite_claude_md:
+        claude_md_path.write_text(template_text, encoding="utf-8")
+    else:
+        ensure_file(claude_md_path, template_text)
+    ensure_file(manifest_path, json.dumps({"sources": []}, indent=2) + "\n")
+    ensure_file((vault_root / "wiki" / "index.md"), "# Wiki Index\n\n")
+    ensure_file((vault_root / "wiki" / "log.md"), "# Wiki Log\n\n")
 
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(yaml.safe_dump(registry_doc, sort_keys=True), encoding="utf-8")
 
     print("")
-    print(f"Created vault '{slug}' ({label}) at: {vault_root}")
+    action = "Updated" if existing else "Created"
+    print(f"{action} vault '{slug}' ({label}) at: {vault_root}")
     print(f"Updated registry: {registry_path}")
     print("")
     print("Next steps:")
