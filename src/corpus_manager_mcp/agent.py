@@ -334,6 +334,14 @@ def run_tool_loop(
             else:
                 try:
                     out = handler(inp)
+                except KeyError as exc:
+                    out = {
+                        "ok": False,
+                        "error": (
+                            f"missing required input field {exc} for tool '{name}'; "
+                            f"received keys: {sorted(inp.keys())}"
+                        ),
+                    }
                 except Exception as exc:  # noqa: BLE001
                     out = {"ok": False, "error": str(exc)}
             results.append(
