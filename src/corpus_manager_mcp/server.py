@@ -60,8 +60,8 @@ CLIENT = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROP
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 ANTHROPIC_QUERY_MODEL = os.getenv("ANTHROPIC_QUERY_MODEL", "claude-sonnet-4-5")
-# Use Opus for ingest operations to benefit from higher ingest TPM limits.
-ANTHROPIC_INGEST_MODEL = "claude-opus-4-1-20250805"
+ANTHROPIC_INGEST_MODEL = os.getenv("ANTHROPIC_INGEST_MODEL", ANTHROPIC_MODEL)
+ANTHROPIC_INGEST_TEMPERATURE = float(os.getenv("ANTHROPIC_INGEST_TEMPERATURE", "0"))
 MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
 INGEST_SOURCE_CHAR_LIMIT = int(os.getenv("INGEST_SOURCE_CHAR_LIMIT", "6000"))
 INGEST_CLAUDE_MD_CHAR_LIMIT = int(os.getenv("INGEST_CLAUDE_MD_CHAR_LIMIT", "8000"))
@@ -388,6 +388,22 @@ def _spawn_ingest_worker(job_id: str) -> None:
                     job = doc.get("jobs", {}).get(job_id)
                     if not isinstance(job, dict):
                         return
+                    if not result.get("ok"):
+                        job["status"] = "failed"
+                        job["finished_at"] = _utc_now()
+                        job["current_source"] = None
+                        job["failed_sources"] = sorted(set(list(job.get("failed_sources") or []) + [rel]))
+                        job["errors"] = list(job.get("errors") or []) + [
+                            {
+                                "source": rel,
+                                "error": result.get("error", "unknown"),
+                                "error_detail": result.get("error_detail"),
+                            }
+                        ]
+                        job["results"] = list(job.get("results") or []) + [{"source": rel, **result}]
+                        job["updated_at"] = _utc_now()
+                        _save_ingest_jobs(doc)
+                        return
                     pending = list(job.get("pending_sources") or [])
                     if pending and pending[0] == rel:
                         pending = pending[1:]
@@ -397,11 +413,6 @@ def _spawn_ingest_worker(job_id: str) -> None:
                     job["processed_sources"] = list(job.get("processed_sources") or []) + [rel]
                     job["results"] = list(job.get("results") or []) + [{"source": rel, **result}]
                     job["updated_at"] = _utc_now()
-                    if not result.get("ok"):
-                        job["errors"] = list(job.get("errors") or []) + [
-                            {"source": rel, "error": result.get("error", "unknown")}
-                        ]
-                # keep going even if one source fails; run through full queue
                     _save_ingest_jobs(doc)
 
                 if INGEST_SOURCE_DELAY_SECONDS > 0:
@@ -434,6 +445,11 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
     pending = list(job.get("pending_sources") or [])
     processed = list(job.get("processed_sources") or [])
     errors = list(job.get("errors") or [])
+    error_sources = [str(error.get("source")) for error in errors if isinstance(error, dict) and error.get("source")]
+    failed = sorted(set(list(job.get("failed_sources") or []) + error_sources))
+    processed = [source for source in processed if source not in failed]
+    if job.get("status") == "failed":
+        pending = sorted(set(pending + failed))
     return {
         "job_id": jid,
         "status": job.get("status"),
@@ -443,8 +459,10 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
         "current_source": job.get("current_source"),
         "pending_count": len(pending),
         "processed_count": len(processed),
+        "failed_count": len(failed),
         "pending_sources_preview": pending[:20],
         "processed_sources_preview": processed[-20:],
+        "failed_sources_preview": failed[-20:],
         "error_count": len(errors),
         "errors_preview": errors[-5:],
     }
@@ -576,6 +594,7 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
         INGEST_TOOLS,
         max_turns=INGEST_LOOP_MAX_TURNS,
         max_tokens=INGEST_LOOP_MAX_TOKENS,
+        temperature=ANTHROPIC_INGEST_TEMPERATURE,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )
@@ -654,6 +673,7 @@ def ingest(filename: str = "", topic: str = "", retry: bool = False) -> dict[str
             "current_source": None,
             "pending_sources": pending,
             "processed_sources": [],
+            "failed_sources": [],
             "results": [],
             "errors": [],
             "pending_at_start": len(pending),
@@ -699,6 +719,7 @@ def deprecate(filename: str, reason: str) -> dict[str, Any]:
         DEPRECATE_TOOLS,
         max_turns=INGEST_LOOP_MAX_TURNS,
         max_tokens=INGEST_LOOP_MAX_TOKENS,
+        temperature=ANTHROPIC_INGEST_TEMPERATURE,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
     )

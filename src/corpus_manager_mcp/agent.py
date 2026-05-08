@@ -10,6 +10,7 @@ from typing import Any, Callable
 from anthropic import (
     Anthropic,
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     InternalServerError,
     RateLimitError,
@@ -26,6 +27,57 @@ from corpus_manager_mcp.vault_ops import (
 )
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def _content_char_count(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(_content_char_count(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_content_char_count(item) for item in value.values())
+    return len(str(value)) if value is not None else 0
+
+
+def _request_summary(
+    *,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    system: str,
+    tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    turn_index: int,
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "turn_index": turn_index,
+        "message_count": len(messages),
+        "system_chars": len(system),
+        "message_content_chars": sum(_content_char_count(message.get("content")) for message in messages),
+        "tool_names": [str(tool.get("name")) for tool in tools],
+    }
+
+
+def _error_detail(exc: Exception, request_summary: dict[str, Any]) -> dict[str, Any]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    request_id = getattr(exc, "request_id", None)
+    if request_id is None and headers is not None:
+        request_id = headers.get("request-id") or headers.get("x-request-id")
+
+    detail: dict[str, Any] = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "request": request_summary,
+    }
+    if isinstance(exc, APIStatusError):
+        detail["status_code"] = exc.status_code
+    if request_id:
+        detail["request_id"] = request_id
+    return detail
 
 INGEST_TOOLS: list[dict[str, Any]] = [
     {
@@ -197,6 +249,7 @@ def run_tool_loop(
     *,
     max_turns: int = 28,
     max_tokens: int = 16_384,
+    temperature: float = 0,
     retry_attempts: int = 3,
     retry_wait_seconds: int = 12,
 ) -> dict[str, Any]:
@@ -205,14 +258,24 @@ def run_tool_loop(
     last_text = ""
 
     retryable_exc = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
-    for _ in range(max_turns):
+    for turn_index in range(max_turns):
         last_exc: Exception | None = None
         resp = None
         for attempt in range(retry_attempts + 1):
+            request_summary = _request_summary(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                tools=tools,
+                messages=messages,
+                turn_index=turn_index,
+            )
             try:
                 resp = client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
+                    temperature=temperature,
                     system=system,
                     tools=tools,
                     messages=messages,
@@ -221,12 +284,27 @@ def run_tool_loop(
             except retryable_exc as exc:
                 last_exc = exc
                 if attempt >= retry_attempts:
-                    return {"ok": False, "error": str(exc), "summary_text": last_text}
+                    return {
+                        "ok": False,
+                        "error": str(exc),
+                        "error_detail": _error_detail(exc, request_summary),
+                        "summary_text": last_text,
+                    }
                 time.sleep(retry_wait_seconds * (attempt + 1))
             except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "error": str(exc), "summary_text": last_text}
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_detail": _error_detail(exc, request_summary),
+                    "summary_text": last_text,
+                }
         if resp is None and last_exc is not None:
-            return {"ok": False, "error": str(last_exc), "summary_text": last_text}
+            return {
+                "ok": False,
+                "error": str(last_exc),
+                "error_detail": _error_detail(last_exc, request_summary),
+                "summary_text": last_text,
+            }
 
         text_parts: list[str] = []
         tool_uses: list[Any] = []
