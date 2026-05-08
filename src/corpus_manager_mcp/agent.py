@@ -316,10 +316,20 @@ def run_tool_loop(
         messages.append({"role": "assistant", "content": resp.content})
 
         if resp.stop_reason == "end_turn" and not tool_uses:
-            return {"ok": True, "summary_text": last_text, "stop_reason": resp.stop_reason}
+            return {
+                "ok": True,
+                "summary_text": last_text,
+                "stop_reason": resp.stop_reason,
+                "turns_used": turn_index + 1,
+            }
 
         if not tool_uses:
-            return {"ok": True, "summary_text": last_text, "stop_reason": resp.stop_reason}
+            return {
+                "ok": True,
+                "summary_text": last_text,
+                "stop_reason": resp.stop_reason,
+                "turns_used": turn_index + 1,
+            }
 
         results: list[dict[str, Any]] = []
         for tu in tool_uses:
@@ -354,4 +364,9 @@ def run_tool_loop(
 
         messages.append({"role": "user", "content": results})
 
-    return {"ok": False, "error": "max_turns_exceeded", "summary_text": last_text}
+    return {
+        "ok": False,
+        "error": "max_turns_exceeded",
+        "summary_text": last_text,
+        "turns_used": max_turns,
+    }

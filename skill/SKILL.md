@@ -24,6 +24,7 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 | “Initialize my wiki around X”, “Start my knowledge base about X” | `ingest` | Use optional `topic` argument to seed first-time starter wiki scaffolding when the vault has no captures yet. |
 | “Try the ingest again”, “Retry the ingest”, “The previous ingest failed, run it again” | `ingest` | Pass `retry=true` to start a fresh attempt after a failed job. Without it, repeat calls return the previous failure so the user can see why it failed before retrying. |
 | “Try ingesting with a different model”, “Fall back to Sonnet for ingest”, “Opus is failing, use a different model” | `ingest` | Pass `model` (e.g. `claude-sonnet-4-6`) to override the configured ingest model for this job; useful when the default model is having issues. Combine with `retry=true` to retry a failed job on a different model. |
+| “Give the ingest more turns”, “Bump the turn budget”, “The ingest is hitting its turn limit” | `ingest` | Pass `max_turns` (e.g. `max_turns=40`) to raise the per-source agent turn budget for this job. Default is 28. Use when a source previously failed with `error="max_turns_exceeded"`, especially for complex reconciliation across many existing wiki pages. Combine with `retry=true`. |
 | “What’s the wiki status?”, “Check knowledge base status”, “What’s pending?”, “Do I have unprocessed captures?” | `stats` | Get current state and pending count. |
 | “Ask the wiki…”, “What do my notes say about X?”, “Search my knowledge base for X”, “What have I captured about X?” | `query` | Use `question`; set `allow_raw=true` only when user requests direct source grounding/quotes. |
 | “Audit this page”, “Verify this entry against sources” | `verify` | Read-only source-grounding check for one page. |
@@ -39,6 +40,7 @@ Use this skill with your **single** remote MCP server URL for Corpus Manager (TL
 5. If user asks for status and pending sources are non-zero, ask once whether they want to process captures now.
 6. If user asks a knowledge question, prefer `query` automatically even when they say “notes”, “memory”, “knowledge base”, or “second brain” instead of “wiki”.
 7. If `ingest` reports a previous failed job, summarize `errors_preview` for the user and offer to retry. If the failure looks model-specific (e.g. repeated 5xx from the API on one model), suggest retrying with a `model` fallback (e.g. `claude-sonnet-4-6`).
+8. If `errors_preview` shows `error="max_turns_exceeded"`, the per-source agent budget was hit. Surface `last_summary_text` (what the model was doing when cut off) and the `remedy` field, then offer to retry with a higher `max_turns` (e.g. `retry=true, max_turns=40`). If the model was already deep into the work (writing index/manifest) when cut off, retrying with a moderate bump (e.g. 35–40) is usually enough.
 
 ## Vault assumptions
 

@@ -64,7 +64,7 @@ ANTHROPIC_INGEST_MODEL = os.getenv("ANTHROPIC_INGEST_MODEL", ANTHROPIC_MODEL)
 MD_MCP_HTTP_URL = os.getenv("MD_MCP_HTTP_URL", "").rstrip("/")
 INGEST_SOURCE_CHAR_LIMIT = int(os.getenv("INGEST_SOURCE_CHAR_LIMIT", "6000"))
 INGEST_CLAUDE_MD_CHAR_LIMIT = int(os.getenv("INGEST_CLAUDE_MD_CHAR_LIMIT", "8000"))
-INGEST_LOOP_MAX_TURNS = 10
+INGEST_LOOP_MAX_TURNS = int(os.getenv("INGEST_LOOP_MAX_TURNS", "35"))
 INGEST_LOOP_MAX_TOKENS = 2500
 INGEST_RATE_RETRY_ATTEMPTS = int(os.getenv("INGEST_RATE_RETRY_ATTEMPTS", "3"))
 INGEST_RATE_RETRY_WAIT_SECONDS = int(os.getenv("INGEST_RATE_RETRY_WAIT_SECONDS", "12"))
@@ -128,6 +128,12 @@ Karpathy-style wiki (operational layer):
 - After editing wiki pages, call manifest_upsert_source with the source filename and full wiki_pages list (paths relative to wiki/, no wiki/ prefix).
 - Update wiki/index.md when adding navigable pages.
 - Finish by append_operation_log with bullets listing wiki paths touched and manifest updated.
+
+Tool-use efficiency (does not affect output quality):
+- When you need several independent reads, issue them as parallel tool_use blocks in a single message (e.g. multiple vault_reads at once, or vault_read + manifest_get_source together) rather than one tool call per turn.
+- Read each wiki page at most once per ingest. If you've already seen a page in this session, work from that content; do not re-read.
+- Trust tool success responses. Do not call vault_read after a successful wiki_write to verify; the write succeeded if the result is ok.
+- Plan the full set of wiki_write calls before issuing them. Avoid speculative writes that you then revise.
 
 wiki_pages in manifest use paths relative to wiki/ (e.g. concepts/foo.md), NOT prefixed with wiki/.
 """
@@ -376,12 +382,13 @@ def _spawn_ingest_worker(job_id: str) -> None:
                         return
                     rel = pending[0]
                     job_model = job.get("model") or ANTHROPIC_INGEST_MODEL
+                    job_max_turns = int(job.get("max_turns") or INGEST_LOOP_MAX_TURNS)
                     job["status"] = "running"
                     job["current_source"] = rel
                     job["updated_at"] = _utc_now()
                     _save_ingest_jobs(doc)
 
-                result = _run_ingest_agent(rel, model=job_model)
+                result = _run_ingest_agent(rel, model=job_model, max_turns=job_max_turns)
 
                 with _INGEST_LOCK:
                     doc = _load_ingest_jobs()
@@ -393,13 +400,19 @@ def _spawn_ingest_worker(job_id: str) -> None:
                         job["finished_at"] = _utc_now()
                         job["current_source"] = None
                         job["failed_sources"] = sorted(set(list(job.get("failed_sources") or []) + [rel]))
-                        job["errors"] = list(job.get("errors") or []) + [
-                            {
-                                "source": rel,
-                                "error": result.get("error", "unknown"),
-                                "error_detail": result.get("error_detail"),
-                            }
-                        ]
+                        error_entry: dict[str, Any] = {
+                            "source": rel,
+                            "error": result.get("error", "unknown"),
+                            "error_detail": result.get("error_detail"),
+                        }
+                        if result.get("error") == "max_turns_exceeded":
+                            error_entry["last_summary_text"] = result.get("summary_text") or ""
+                            error_entry["remedy"] = (
+                                f"Hit per-source turn budget of {job_max_turns}. "
+                                "Retry with a higher budget: ingest(retry=True, max_turns=N) "
+                                "where N is e.g. 40 for complex multi-page reconciliations."
+                            )
+                        job["errors"] = list(job.get("errors") or []) + [error_entry]
                         job["results"] = list(job.get("results") or []) + [{"source": rel, **result}]
                         job["updated_at"] = _utc_now()
                         _save_ingest_jobs(doc)
@@ -454,6 +467,7 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
         "job_id": jid,
         "status": job.get("status"),
         "model": job.get("model"),
+        "max_turns": job.get("max_turns"),
         "started_at": job.get("started_at"),
         "updated_at": job.get("updated_at"),
         "finished_at": job.get("finished_at"),
@@ -571,7 +585,12 @@ def lint() -> dict[str, Any]:
     return {"deterministic": det, "narrative_report": narrative}
 
 
-def _run_ingest_agent(source_rel: str, *, model: str | None = None) -> dict[str, Any]:
+def _run_ingest_agent(
+    source_rel: str,
+    *,
+    model: str | None = None,
+    max_turns: int | None = None,
+) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     read_out = vault_read(CFG_ROOT, source_rel)
@@ -593,7 +612,7 @@ def _run_ingest_agent(source_rel: str, *, model: str | None = None) -> dict[str,
         CFG_ROOT,
         CFG_MANIFEST,
         INGEST_TOOLS,
-        max_turns=INGEST_LOOP_MAX_TURNS,
+        max_turns=max_turns or INGEST_LOOP_MAX_TURNS,
         max_tokens=INGEST_LOOP_MAX_TOKENS,
         retry_attempts=INGEST_RATE_RETRY_ATTEMPTS,
         retry_wait_seconds=INGEST_RATE_RETRY_WAIT_SECONDS,
@@ -606,16 +625,27 @@ def _run_ingest_agent(source_rel: str, *, model: str | None = None) -> dict[str,
         "If already running, returns progress. If the most recent run failed, returns the "
         "failure details so the caller can explain them; pass retry=True to start a fresh attempt. "
         "Optional filename targets a specific source. "
-        "Optional model overrides ANTHROPIC_INGEST_MODEL for this job (e.g. 'claude-sonnet-4-5' "
+        "Optional model overrides ANTHROPIC_INGEST_MODEL for this job (e.g. 'claude-sonnet-4-6' "
         "to fall back when the default ingest model is having issues). "
+        "Optional max_turns sets the per-source turn budget for the agent loop "
+        "(default from INGEST_LOOP_MAX_TURNS env, currently 28). Bump it (e.g. max_turns=40) "
+        "when a source needs extensive cross-page reconciliation and previously failed with "
+        "error 'max_turns_exceeded'. "
         "If no captures exist yet, this can initialize a starter wiki scaffold (optional topic)."
     )
 )
-def ingest(filename: str = "", topic: str = "", retry: bool = False, model: str = "") -> dict[str, Any]:
+def ingest(
+    filename: str = "",
+    topic: str = "",
+    retry: bool = False,
+    model: str = "",
+    max_turns: int = 0,
+) -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     requested_filename = filename.strip()
     requested_model = model.strip() or ANTHROPIC_INGEST_MODEL
+    requested_max_turns = max_turns if max_turns > 0 else INGEST_LOOP_MAX_TURNS
     with _INGEST_LOCK:
         doc = _load_ingest_jobs()
         current_id, current_job = _get_job(doc)
@@ -671,6 +701,7 @@ def ingest(filename: str = "", topic: str = "", retry: bool = False, model: str 
             "status": "queued",
             "mode": mode,
             "model": requested_model,
+            "max_turns": requested_max_turns,
             "started_at": started,
             "updated_at": started,
             "finished_at": None,
