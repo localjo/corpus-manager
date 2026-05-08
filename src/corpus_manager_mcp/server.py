@@ -48,10 +48,11 @@ CFG_MANIFEST = VP.manifest
 CFG_CLAUDE_MD = VP.claude_md
 
 SERVER_INSTRUCTIONS = (
-    "Corpus Manager is a VPS-hosted second-brain server for markdown vault workflows. "
-    "Use capture to save quick notes into raw/, ingest to start-or-report background ingest jobs "
-    "(optional filename for targeted ingest), query for wiki-first answers, lint/verify for read-only audits, "
-    "deprecate to retire sources, and stats for counts/health."
+    "Corpus Manager is a VPS-hosted personal knowledge base manager. "
+    "Users may say wiki, notes, knowledge base, second brain, memory, or vault. "
+    "Use capture when users say capture/store/save/remember this, ingest when users say process/update/sync notes into the knowledge base, "
+    "stats for status/what is pending, query for ask/find/what do my notes say, lint/verify for audits, and deprecate to retire a source. "
+    "If users ask to initialize/start a brand-new wiki and there are no captures yet, ingest may create a starter scaffold (optionally topic-guided)."
 )
 
 MCP = FastMCP("Corpus Manager", instructions=SERVER_INSTRUCTIONS)
@@ -189,6 +190,77 @@ def _pending_sources() -> list[str]:
         if mtime > ingested_dt:
             pending.append(rel)
     return sorted(set(pending))
+
+
+def _wiki_is_effectively_empty() -> bool:
+    if not CFG_WIKI.exists():
+        return True
+    for p in CFG_WIKI.rglob("*.md"):
+        if p.name == ".ingest-jobs.json":
+            continue
+        return False
+    return True
+
+
+def _initialize_empty_wiki(topic: str = "") -> dict[str, Any]:
+    """Create a starter wiki scaffold when no sources exist yet."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    topic_line = topic.strip() or "General"
+    created: list[str] = []
+
+    files_to_write = {
+        "wiki/index.md": (
+            "# Wiki Index\n\n"
+            "This wiki was initialized by Corpus Manager.\n\n"
+            "## Getting started\n\n"
+            f"- Topic focus: **{topic_line}**\n"
+            "- Add captures, then run ingest to compile pages.\n"
+        ),
+        "wiki/log.md": (
+            "# Wiki Log\n\n"
+            "Operational log for write actions.\n"
+        ),
+        "wiki/synthesis/getting-started.md": (
+            "---\n"
+            "type: synthesis\n"
+            "book: shared\n"
+            "sources: []\n"
+            f"date_updated: {today}\n"
+            "tags:\n"
+            "  - bootstrap\n"
+            "  - overview\n"
+            "---\n\n"
+            f"# Getting Started ({topic_line})\n\n"
+            "This starter page was created because ingest was requested before any captures existed.\n"
+            "Capture notes in `raw/`, then run ingest to expand this wiki.\n"
+        ),
+    }
+
+    for rel, content in files_to_write.items():
+        path = _resolve(rel)
+        if path.exists():
+            continue
+        _write_text(path, content)
+        created.append(rel)
+
+    manifest_doc = _read_json(CFG_MANIFEST)
+    if not isinstance(manifest_doc, dict):
+        manifest_doc = {}
+    if "sources" not in manifest_doc or not isinstance(manifest_doc["sources"], list):
+        manifest_doc["sources"] = []
+        _write_text(CFG_MANIFEST, json.dumps(manifest_doc, indent=2, ensure_ascii=False) + "\n")
+        created.append("manifest.json")
+
+    append_operation_log(
+        CFG_ROOT,
+        "initialize",
+        "empty-wiki",
+        [
+            f"created starter wiki scaffold ({topic_line})",
+            *(f"created `{p}`" for p in created),
+        ],
+    )
+    return {"created": created, "topic": topic_line}
 
 
 def _search_wiki_keywords(question: str, limit: int = 8) -> list[str]:
@@ -379,7 +451,7 @@ def _ingest_status_payload(doc: dict[str, Any], job_id: str | None = None) -> di
 
 
 @MCP.tool(
-    description="Show vault health and counts: total/active/deprecated sources, pending raw files, wiki page count, and md-mcp reachability."
+    description="Show knowledge-base status: how many sources/pages exist, how many are pending processing, and overall connector health."
 )
 def stats() -> dict[str, Any]:
     manifest = _manifest_sources()
@@ -404,8 +476,7 @@ def stats() -> dict[str, Any]:
 
 @MCP.tool(
     description=(
-        "Save a quick note or raw idea into the vault raw/ directory. "
-        "Use this to capture thoughts, observations, reflections, or fragments for later ingest into the wiki."
+        "Capture/store/remember a note, thought, idea, or fragment for later processing into the knowledge base."
     )
 )
 def capture(content: str, filename: str = "", frontmatter: dict[str, Any] | None = None) -> dict[str, str]:
@@ -431,7 +502,7 @@ def capture(content: str, filename: str = "", frontmatter: dict[str, Any] | None
 
 
 @MCP.tool(
-    description="Answer a user question from wiki-first context. Optionally allow raw source grounding when explicit source quotes/verification are requested."
+    description="Answer questions from the user's notes/knowledge base (wiki-first), with optional source grounding (raw) when requested."
 )
 def query(question: str, allow_raw: bool = False) -> dict[str, str]:
     wiki_context = _query_context(question, allow_raw)
@@ -449,7 +520,7 @@ def query(question: str, allow_raw: bool = False) -> dict[str, str]:
 
 
 @MCP.tool(
-    description="Read-only audit of one wiki page against its cited sources; returns confirmed claims, mismatches, and untraceable claims."
+    description="Read-only source audit for one page/topic: returns confirmed claims, mismatches, and untraceable statements."
 )
 def verify(wiki_page: str) -> dict[str, str]:
     rel = wiki_page if wiki_page.startswith("wiki/") else f"wiki/{wiki_page}"
@@ -466,7 +537,7 @@ def verify(wiki_page: str) -> dict[str, str]:
 
 
 @MCP.tool(
-    description="Read-only vault quality check for broken wikilinks, traceability gaps, deprecated references, missing sources, and index coverage issues."
+    description="Read-only quality check for the knowledge base: broken links, traceability gaps, missing/deprecated references, and coverage issues."
 )
 def lint() -> dict[str, Any]:
     det = build_lint_payload(CFG_ROOT)
@@ -512,11 +583,12 @@ def _run_ingest_agent(source_rel: str) -> dict[str, Any]:
 
 @MCP.tool(
     description=(
-        "Start ingest as a background job if none is running; otherwise return current ingest progress/status. "
-        "Optional filename runs targeted ingest for one source path. Without filename, ingests all pending raw/ sources."
+        "Process captured notes into the knowledge base in the background (start-or-report). "
+        "If already running, returns progress. Optional filename targets a specific source. "
+        "If no captures exist yet, this can initialize a starter wiki scaffold (optional topic)."
     )
 )
-def ingest(filename: str = "") -> dict[str, Any]:
+def ingest(filename: str = "", topic: str = "") -> dict[str, Any]:
     if CLIENT is None:
         raise RuntimeError("ANTHROPIC_API_KEY is required for ingest")
     with _INGEST_LOCK:
@@ -542,6 +614,15 @@ def ingest(filename: str = "") -> dict[str, Any]:
             pending = _pending_sources()
             mode = "full"
         if not pending:
+            if mode == "full" and _wiki_is_effectively_empty():
+                init = _initialize_empty_wiki(topic=topic)
+                return {
+                    "status": "initialized",
+                    "message": "No captures found; created starter wiki structure.",
+                    "topic": init.get("topic"),
+                    "created": init.get("created", []),
+                    "pending_count": 0,
+                }
             payload = _ingest_status_payload(doc, current_id) if current_id else {"status": "completed"}
             payload["message"] = "No pending sources."
             payload["pending_count"] = 0
@@ -581,7 +662,7 @@ def ingest(filename: str = "") -> dict[str, Any]:
 
 
 @MCP.tool(
-    description="Deprecate a source file with a reason, update manifest status, and reconcile affected wiki pages and citations."
+    description="Retire/remove a source from active knowledge-base use, update provenance status, and reconcile affected pages/citations."
 )
 def deprecate(filename: str, reason: str) -> dict[str, Any]:
     if CLIENT is None:
